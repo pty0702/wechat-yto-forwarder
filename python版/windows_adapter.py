@@ -1,7 +1,7 @@
 """Windows UI Automation 适配器：严格校验当前群、消息标识和发送回显。
 
 控件结构通过 JSON 描述。未暴露可访问消息控件的客户端会明确拒绝启动。
-此模块不读取聊天数据库，不修改客户端进程，也不依据屏幕坐标猜测目标。
+不读取聊天数据库。实验性微信兼容通过独立上下文临时开启已核对构建的控件。
 """
 
 import argparse
@@ -10,7 +10,7 @@ import json
 import re
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime
 from pathlib import Path
 
@@ -174,7 +174,7 @@ def load_profile(path):
 class WindowsChatAdapter:
     """同一对象兼任来源和发送端，保证 COM 控件在创建它的线程中使用。"""
 
-    def __init__(self, auto, profile, group, namespace, log=print):
+    def __init__(self, auto, profile, group, namespace, log=print, expected_pid=None):
         self.auto = auto
         self.profile = _format(profile, group=group)
         self.group = group
@@ -183,9 +183,15 @@ class WindowsChatAdapter:
         self.tracker = SnapshotTracker(log)
         self.window = None
         self._process_id = None
+        self._expected_pid = expected_pid
 
     def _bind(self):
         self.window = select(self.auto.GetRootControl(), self.profile["window"], f"{self.namespace}窗口")
+        pid = getattr(self.window, "ProcessId", None)
+        if self._expected_pid is not None and pid != self._expected_pid:
+            raise AdapterConfigurationError(f"{self.namespace}进程已变化，请停止并重新启动转发会话")
+        if pid is not None and self._expected_pid is None:
+            self._expected_pid = pid
         if self.profile.get("process_name") and self.window.ProcessId != self._process_id:
             process = next((p for p in self.auto.GetProcesses(False) if p.pid == self.window.ProcessId), None)
             if process is None or process.exeName.lower() != self.profile["process_name"].lower():
@@ -204,7 +210,8 @@ class WindowsChatAdapter:
 
     def prepare(self):
         window = self._bind()
-        select(window, self.profile["input"], "聊天输入框")
+        edit = select(window, self.profile["input"], "聊天输入框")
+        self._value(edit)
         self.tracker.update(self._rows())
         self.log(f"[适配] {self.namespace} 已核对目标群并建立历史快照")
 
@@ -221,6 +228,8 @@ class WindowsChatAdapter:
         pattern = edit.GetPattern(self.auto.PatternId.TextPattern)
         if pattern:
             value = pattern.DocumentRange.GetText(-1)
+            if "\ufffc" in value:
+                raise AdapterConfigurationError("输入框包含 UIA 嵌入对象占位符，无法确认完整草稿；请核对输入控件适配")
             # 个别控件会追加结构性的段落结束符，必须经诊断确认后显式配置。
             suffix = self.profile.get("text_pattern_suffix", "")
             if suffix and value.endswith(suffix):
@@ -274,7 +283,11 @@ class WindowsChatAdapter:
             edit = select(window, self.profile["input"], "聊天输入框")
             if self._value(edit):
                 raise RetryableSendError("目标输入框已有草稿，请先处理草稿；程序不会覆盖")
-            before = {msg.message_id for msg in self._rows()}
+            before_rows = self._rows()
+            if not before_rows:
+                raise AdapterConfigurationError("当前消息列表为空，缺少可验证发送回显的历史锚点")
+            before = {msg.message_id for msg in before_rows}
+            anchor = before_rows[-1].message_id
             self._focus(edit)
             expected = _normalized(text)
             if staff:
@@ -310,9 +323,13 @@ class WindowsChatAdapter:
             self._enter(edit)
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
-                for row in self._rows():
-                    if row.message_id not in before and row.is_self and _normalized(row.content) == expected:
-                        return
+                after = self._rows()
+                anchors = [i for i, row in enumerate(after) if row.message_id == anchor]
+                # 控件整体重建后同文历史可能获得新ID；没有原尾锚点就不能证明追加。
+                if len(anchors) == 1 and not self._value(edit):
+                    for row in after[anchors[0] + 1:]:
+                        if row.message_id not in before and row.is_self and _normalized(row.content) == expected:
+                            return
                 time.sleep(0.15)
             raise SendUncertainError("发送后未找到本账号的完整消息回显，请人工核对；已停止，避免重复发送")
         except SendUncertainError:
@@ -342,6 +359,11 @@ def _automation():
     return auto
 
 
+def _wechat_session(pid, log):
+    from wechat_accessibility import WechatAccessibilitySession
+    return WechatAccessibilitySession(pid, enable=True, log=log)
+
+
 @contextmanager
 def create_live_adapters(cfg, log=print):
     profile_path = cfg.get("adapter_profile", "")
@@ -351,16 +373,24 @@ def create_live_adapters(cfg, log=print):
     if cfg.get("at_keywords") and not all(profile["wx"].get(key) for key in ("mention_item", "mention_token")):
         raise AdapterConfigurationError("设置了 @客服词，但微信适配配置尚未提供真实 @ 控件")
     auto = _automation()
-    with auto.UIAutomationInitializerInThread():
-        wx = WindowsChatAdapter(auto, profile["wx"], cfg["wx_group"], "微信", log)
+    if not isinstance(cfg.get("wechat_accessibility", False), bool):
+        raise AdapterConfigurationError("微信兼容开关必须为布尔值")
+    with auto.UIAutomationInitializerInThread(), ExitStack() as contexts:
+        wx_window = select(auto.GetRootControl(), profile["wx"]["window"], "微信窗口")
+        pid = wx_window.ProcessId
+        if cfg.get("wechat_accessibility", False):
+            contexts.enter_context(_wechat_session(pid, log))
+        wx = WindowsChatAdapter(auto, profile["wx"], cfg["wx_group"], "微信", log, expected_pid=pid)
         kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
         wx.prepare()
         kf.prepare()
         yield wx, wx, kf, kf
 
 
-def diagnose(output_dir, log=print):
-    """只读取两个目标窗口，诊断文件留在本地，不发送消息或改变聊天内容。"""
+def diagnose(output_dir, log=print, enable_wechat=False, stop_event=None):
+    """读取目标窗口；可选临时启用微信控件，完成或中止时恢复，不发送消息。"""
+    if not isinstance(enable_wechat, bool):
+        raise ValueError("微信兼容开关必须为布尔值")
     auto = _automation()
     output = Path(output_dir).resolve()
     project = Path(__file__).resolve().parent.parent
@@ -368,19 +398,51 @@ def diagnose(output_dir, log=print):
         raise ValueError("诊断文件必须保存在当前项目目录中")
     output.mkdir(parents=True, exist_ok=True)
     report = {"time": datetime.now().isoformat(timespec="seconds"), "windows": []}
-    with auto.UIAutomationInitializerInThread():
+    with auto.UIAutomationInitializerInThread(), ExitStack() as contexts:
+        if stop_event is not None and stop_event.is_set():
+            return None
+        if enable_wechat:
+            wx_window = select(auto.GetRootControl(), {"name": "微信", "depth": 1}, "微信窗口")
+            contexts.enter_context(_wechat_session(wx_window.ProcessId, log))
         for window in auto.GetRootControl().GetChildren():
+            if stop_event is not None and stop_event.is_set():
+                report["cancelled"] = True
+                break
             if window.Name not in {"微信", "WeChat", "客户管家"}:
                 continue
             nodes = []
             try:
                 stack = [(window, 0)]
                 while stack and len(nodes) < 3000:
+                    if stop_event is not None and stop_event.is_set():
+                        report["cancelled"] = True
+                        break
                     node, depth = stack.pop()
-                    nodes.append({"depth": depth, "type": node.ControlTypeName,
-                                  "name": node.Name, "automation_id": node.AutomationId,
-                                  "class_name": node.ClassName})
-                    if depth < 30:
+                    record = {"depth": depth, "type": node.ControlTypeName,
+                              "name": node.Name, "automation_id": node.AutomationId,
+                              "class_name": node.ClassName}
+                    try:
+                        rect = node.BoundingRectangle
+                        record.update(runtime_id=list(node.GetRuntimeId()),
+                                      rectangle=[rect.left, rect.top, rect.right, rect.bottom],
+                                      help_text=node.HelpText,
+                                      full_description=node.GetPropertyValue(auto.PropertyId.FullDescriptionProperty))
+                        legacy = node.GetPattern(auto.PatternId.LegacyIAccessiblePattern)
+                        if legacy:
+                            record["legacy_description"] = legacy.Description
+                            record["legacy_value"] = legacy.Value
+                        if node.AutomationId in {"chat_input_field", "edit-content"} or node.ControlTypeName == "ListItemControl":
+                            value = node.GetPattern(auto.PatternId.ValuePattern)
+                            text = node.GetPattern(auto.PatternId.TextPattern)
+                            record["value_pattern"] = value.Value if value else None
+                            record["text_pattern"] = text.DocumentRange.GetText(-1) if text else None
+                            if text:
+                                record["text_rectangles"] = [[r.left, r.top, r.right, r.bottom]
+                                                             for r in text.DocumentRange.GetBoundingRectangles()]
+                    except Exception as detail_error:
+                        record["detail_error"] = str(detail_error)
+                    nodes.append(record)
+                    if depth < 40:
                         stack.extend((child, depth + 1) for child in reversed(node.GetChildren()))
                 report["windows"].append({"title": window.Name, "nodes": nodes, "truncated": bool(stack)})
             except Exception as exc:
@@ -394,12 +456,13 @@ def diagnose(output_dir, log=print):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="窗口只读诊断")
+    parser = argparse.ArgumentParser(description="窗口诊断（默认不启用实验性兼容）")
     parser.add_argument("--diagnose", action="store_true", help="导出微信和客户管家控件树")
+    parser.add_argument("--enable-wechat", action="store_true", help="临时启用已验证微信构建的控件，诊断后恢复")
     args = parser.parse_args()
     if args.diagnose:
         try:
-            diagnose(Path(__file__).resolve().parent.parent / "diagnostics")
+            diagnose(Path(__file__).resolve().parent.parent / "diagnostics", enable_wechat=args.enable_wechat)
         except Exception as error:
             print(f"诊断失败：{error}", file=sys.stderr)
             sys.exit(1)

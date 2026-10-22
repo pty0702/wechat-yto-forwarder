@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
     "poll_interval": 3,    # 轮询间隔（秒）
     "reset_seconds": 30,   # 转发后 30 秒未等到小圆回复 → 重置该条等待
     "mode": "demo",       # 默认演示；真实运行前另行验证窗口配置
+    "wechat_accessibility": False,  # 明确启用后，仅对已核对构建临时开启控件
     "wx_profile": {},
     "kf_profile": {},
 }
@@ -69,6 +70,8 @@ def validate_config(cfg: dict, live: bool = False) -> dict:
         normalized[key] = value.strip()
     if normalized["mode"] not in ("demo", "live"):
         raise ValueError("运行模式只能是 demo 或 live")
+    if not isinstance(normalized["wechat_accessibility"], bool):
+        raise ValueError("微信兼容开关必须是布尔值 true 或 false")
     if not normalized["bot_name"]:
         raise ValueError("机器人完整名称不能为空")
     for key in ("block_keywords", "at_keywords"):

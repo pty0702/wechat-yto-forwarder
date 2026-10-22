@@ -34,6 +34,7 @@ class ConfigWindow(tk.Tk):
         self._load_config()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Control-d>", lambda event: self.on_diagnose())
         self.after(100, self._drain_events)
         if self._config_error:
             self.after(150, self._show_config_error)
@@ -79,6 +80,7 @@ class ConfigWindow(tk.Tk):
         self.var_profile = tk.StringVar()
         self.var_poll = tk.StringVar()
         self.var_timeout = tk.StringVar()
+        self.var_wechat_accessibility = tk.BooleanVar(value=False)
         ttk.Label(config, text="运行模式").grid(row=0, column=0, sticky="w", pady=5)
         modes = ttk.Combobox(config, textvariable=self.var_mode,
                              values=("演示（内置样例）", "真实客户端"), state="readonly")
@@ -98,16 +100,25 @@ class ConfigWindow(tk.Tk):
         self._configuration_widgets.append((browse, "normal"))
         ttk.Label(config, text="真实运行需使用与当前客户端版本匹配的控件配置；先读取窗口诊断，再按说明填写。",
                   foreground="#586174").grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        compatibility = ttk.Checkbutton(
+            config, text="微信4兼容（实验性，停止后恢复）", variable=self.var_wechat_accessibility,
+        )
+        compatibility.grid(row=8, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        self._configuration_widgets.append((compatibility, "normal"))
+        ttk.Label(
+            config, text="仅对已验证的固定微信版本临时启用控件；诊断结束或停止时恢复。演示不使用此选项。",
+            foreground="#586174",
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 6))
         timing = ttk.Frame(config)
-        timing.grid(row=8, column=0, columnspan=3, sticky="ew", pady=4)
+        timing.grid(row=10, column=0, columnspan=3, sticky="ew", pady=4)
         for label, variable in (("轮询间隔（秒）", self.var_poll), ("无回复超时（秒）", self.var_timeout)):
             ttk.Label(timing, text=label).pack(side="left", padx=(0, 8))
             entry = ttk.Entry(timing, textvariable=variable, width=9)
             entry.pack(side="left", padx=(0, 24))
             self._configuration_widgets.append((entry, "normal"))
         keywords = ttk.Frame(config)
-        keywords.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(10, 4))
-        config.rowconfigure(9, weight=1)
+        keywords.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(10, 4))
+        config.rowconfigure(11, weight=1)
         keywords.columnconfigure((0, 1), weight=1)
         keywords.rowconfigure(1, weight=1)
         ttk.Label(keywords, text="屏蔽词（一行一个，命中即忽略）").grid(row=0, column=0, sticky="w", pady=(0, 4))
@@ -135,7 +146,7 @@ class ConfigWindow(tk.Tk):
         self.btn_reload.pack(side="left")
         self.btn_save = ttk.Button(footer, text="保存配置", command=self.on_save)
         self.btn_save.pack(side="left", padx=6)
-        self.btn_diagnose = ttk.Button(footer, text="只读窗口诊断", command=self.on_diagnose)
+        self.btn_diagnose = ttk.Button(footer, text="窗口诊断 (Ctrl+D)", command=self.on_diagnose)
         self.btn_diagnose.pack(side="left")
         self.btn_stop = ttk.Button(footer, text="停止", command=self.on_stop, state="disabled")
         self.btn_stop.pack(side="right", padx=(6, 0))
@@ -158,6 +169,7 @@ class ConfigWindow(tk.Tk):
             (self.var_timeout, "reset_seconds", 30),
         ):
             variable.set(self.cfg.get(key, default))
+        self.var_wechat_accessibility.set(self.cfg.get("wechat_accessibility", False) is True)
         for widget, key in ((self.txt_block, "block_keywords"), (self.txt_at, "at_keywords")):
             widget.delete("1.0", "end")
             widget.insert("1.0", "\n".join(self.cfg.get(key, [])))
@@ -183,10 +195,11 @@ class ConfigWindow(tk.Tk):
             "service_staff": self.var_staff.get().strip(), "bot_name": self.var_bot.get().strip(),
             "block_keywords": self._lines(self.txt_block), "at_keywords": self._lines(self.txt_at),
             "adapter_profile": profile, "poll_interval": poll, "reset_seconds": timeout,
+            "wechat_accessibility": bool(self.var_wechat_accessibility.get()),
         })
         cfg = validate_config(cfg, live=live)
         if live and (not profile or not Path(profile).is_file()):
-            raise ValueError("请先选择存在的适配配置 JSON 文件；可用“只读窗口诊断”获取当前窗口控件信息")
+            raise ValueError("请先选择存在的适配配置 JSON 文件；可用“窗口诊断”获取当前窗口控件信息")
         return cfg
 
     def _choose_profile(self):
@@ -245,14 +258,19 @@ class ConfigWindow(tk.Tk):
     def on_diagnose(self):
         if self._worker or self._close_requested:
             return
+        enable_wechat = bool(self.var_wechat_accessibility.get())
+        self._stop_event = threading.Event()
 
         def action():
             from windows_adapter import diagnose
-            output = diagnose(PROJECT_DIR / "diagnostics", self._queue_log)
+            output = diagnose(
+                PROJECT_DIR / "diagnostics", self._queue_log,
+                enable_wechat=enable_wechat, stop_event=self._stop_event,
+            )
             self._queue_log(f"[诊断] 已保存：{output}")
 
         self._start_worker("诊断", action)
-        self.var_status.set("正在读取窗口控件信息")
+        self.var_status.set("正在临时启用微信4兼容并诊断" if enable_wechat else "正在读取窗口控件信息")
 
     def _start_worker(self, kind, action):
         self._worker_kind = kind
@@ -277,14 +295,14 @@ class ConfigWindow(tk.Tk):
             widget.configure(state="disabled" if busy else normal_state)
         for button in (self.btn_start, self.btn_save, self.btn_reload, self.btn_diagnose):
             button.configure(state="disabled" if busy else "normal")
-        self.btn_stop.configure(state="normal" if busy and self._worker_kind == "运行" else "disabled")
+        self.btn_stop.configure(state="normal" if busy and self._worker_kind in ("运行", "诊断") else "disabled")
 
     def on_stop(self):
-        if self._worker and self._worker_kind == "运行":
+        if self._worker and self._worker_kind in ("运行", "诊断"):
             self._stop_event.set()
             self.btn_stop.configure(state="disabled")
             self.var_status.set("正在停止，等待当前操作结束…")
-            self._append_log("[停止] 已请求停止，等待工作线程释放客户端连接。")
+            self._append_log("[停止] 已请求停止，等待当前任务结束并恢复本次兼容状态。")
 
     def on_close(self):
         if self._worker:

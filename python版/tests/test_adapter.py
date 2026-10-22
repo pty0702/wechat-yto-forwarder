@@ -340,6 +340,60 @@ class SendTests(unittest.TestCase):
             self.client.send("测试")
         self.assert_not_submitted()
 
+    def test_same_executable_new_pid_cannot_replace_bound_process(self):
+        self.auto.window.ProcessId = 123
+        self.client.profile["process_name"] = "Weixin.exe"
+        self.auto.GetProcesses = lambda detailed: [
+            SimpleNamespace(pid=123, exeName="Weixin.exe"),
+            SimpleNamespace(pid=124, exeName="Weixin.exe"),
+        ]
+        self.client.prepare()
+        # 原无障碍会话属于123，即使新进程同名也不能接管它的收发。
+        self.auto.window.ProcessId = 124
+        with self.assertRaises(adapter.AdapterConfigurationError):
+            self.client.fetch_new()
+        with self.assertRaises(adapter.AdapterConfigurationError):
+            self.client.send("测试")
+        self.assertEqual(self.auto.set_values, [])
+        self.assert_not_submitted()
+
+    def test_observed_pid_is_pinned_even_without_process_name_filter(self):
+        self.auto.window.ProcessId = 123
+        self.client.prepare()
+        self.auto.window.ProcessId = 124
+        with self.assertRaises(adapter.AdapterConfigurationError):
+            self.client.send("测试")
+        self.assertEqual(self.auto.set_values, [])
+        self.assert_not_submitted()
+
+    def test_known_expected_pid_mismatch_is_rejected_before_input(self):
+        self.auto.window.ProcessId = 124
+        with self.assertRaises(adapter.AdapterConfigurationError):
+            client = adapter.WindowsChatAdapter(
+                self.auto, self.profile, "目标群", "微信", expected_pid=123,
+            )
+            client.send("测试")
+        self.assertEqual(self.auto.set_values, [])
+        self.assert_not_submitted()
+
+    def test_known_expected_pid_match_allows_confirmed_send(self):
+        self.auto.window.ProcessId = 123
+        client = adapter.WindowsChatAdapter(
+            self.auto, self.profile, "目标群", "微信", expected_pid=123,
+        )
+        client.send("测试")
+        self.assertEqual(self.auto.sent, ["测试"])
+
+    def test_known_expected_pid_requires_observable_process_identity(self):
+        # 旧模拟控件无PID时，只允许未传expected_pid的既有用法。
+        with self.assertRaises(adapter.AdapterConfigurationError):
+            client = adapter.WindowsChatAdapter(
+                self.auto, self.profile, "目标群", "微信", expected_pid=123,
+            )
+            client.send("测试")
+        self.assertEqual(self.auto.set_values, [])
+        self.assert_not_submitted()
+
     def test_text_pattern_suffix_only_removes_explicit_structural_ending(self):
         self.auto = FakeAuto(value_pattern=False)
         self.client = adapter.WindowsChatAdapter(self.auto, profile(), "目标群", "微信")
@@ -380,6 +434,72 @@ class SendTests(unittest.TestCase):
         with patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
             with self.assertRaises(SendUncertainError):
                 self.client.send("测试")
+
+    def _after_submit(self, callback):
+        """只改变模拟发送后的可见状态，不驱动真实客户端。"""
+        original = self.auto.SendKeys
+
+        def send_keys(keys, **kwargs):
+            original(keys, **kwargs)
+            if keys == "{Enter}":
+                callback()
+
+        return patch.object(self.auto, "SendKeys", side_effect=send_keys)
+
+    def test_rebuilt_list_with_identical_history_is_not_send_confirmation(self):
+        self.auto.messages.children.append(row("old-self", "本人", "测试"))
+        self.auto.echo = False
+
+        def rebuild():
+            # 同一条历史在控件重建后获得新ID，不能当成刚发送的回显。
+            self.auto.messages.children = [row("rebuilt-self", "本人", "测试")]
+            self.auto.draft = ""
+
+        with self._after_submit(rebuild), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+            with self.assertRaises(SendUncertainError):
+                self.client.send("测试")
+        self.assertEqual(self.auto.sent, ["测试"])
+
+    def test_identical_row_before_last_anchor_is_not_send_confirmation(self):
+        self.auto.messages.children.append(row("last-anchor", "客户", "最后一条历史"))
+        self.auto.echo = False
+
+        def reveal_older_history():
+            # 有共同锚点还不够：锚点之前新显露出来的记录仍是历史。
+            self.auto.messages.children.insert(1, row("revealed-history", "本人", "测试"))
+            self.auto.draft = ""
+
+        with self._after_submit(reveal_older_history), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+            with self.assertRaises(SendUncertainError):
+                self.client.send("测试")
+        self.assertEqual(self.auto.sent, ["测试"])
+
+    def test_new_self_echo_does_not_confirm_send_while_draft_remains(self):
+        with self._after_submit(lambda: setattr(self.auto, "draft", "测试")), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+            with self.assertRaises(SendUncertainError):
+                self.client.send("测试")
+        self.assertEqual(self.auto.sent, ["测试"])
+        self.assertEqual(self.auto.draft, "测试")
+
+    def test_empty_baseline_is_rejected_before_any_input(self):
+        self.auto.messages.children = []
+        with self.assertRaises(adapter.AdapterConfigurationError):
+            self.client.send("测试")
+        self.assertEqual(self.auto.set_values, [])
+        self.assertEqual(self.auto.keys, [])
+        self.assert_not_submitted()
+
+    def test_process_change_during_echo_check_is_uncertain(self):
+        self.auto.window.ProcessId = 123
+        self.client.profile["process_name"] = "Weixin.exe"
+        self.auto.GetProcesses = lambda detailed: [
+            SimpleNamespace(pid=123, exeName="Weixin.exe"),
+            SimpleNamespace(pid=124, exeName="Weixin.exe"),
+        ]
+        with self._after_submit(lambda: setattr(self.auto.window, "ProcessId", 124)):
+            with self.assertRaises(SendUncertainError):
+                self.client.send("测试")
+        self.assertEqual(self.auto.sent, ["测试"])
 
     def test_literal_braces_and_multiline_text_do_not_trigger_extra_send(self):
         self.auto = FakeAuto(value_pattern=False)
