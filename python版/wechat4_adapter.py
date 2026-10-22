@@ -304,7 +304,8 @@ class Wechat4Adapter(WindowsChatAdapter):
         self.auto.SendKeys("{Ctrl}{End}", waitTime=0.05)
         body = _normalized(text)
         self._type(edit, " " + body)
-        return "\ufffc " + body, prefix + " " + body
+        # 已核对微信 4.1.15.56 原生 @ 回显在昵称后附加 U+2005，保留正文空白。
+        return "\ufffc " + body, prefix + "\u2005 " + body
 
     @staticmethod
     def _rectangle(node):

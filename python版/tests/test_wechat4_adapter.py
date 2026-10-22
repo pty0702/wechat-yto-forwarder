@@ -891,7 +891,7 @@ class Wechat4MentionTests(unittest.TestCase):
 
     def test_exact_nickname_and_both_expected_forms_without_submit(self):
         result = self.compose()
-        self.assertEqual(result, ("\ufffc " + self.body, "@" + self.staff + " " + self.body))
+        self.assertEqual(result, ("\ufffc " + self.body, "@" + self.staff + "\u2005 " + self.body))
         self.assertEqual(self.auto.draft, result[0])
         self.assertEqual(self.typed, [self.staff, " " + self.body])
         self.assertEqual(self.events[:2], [("physical_at", "{Shift}2"), ("type", self.staff)])
@@ -1051,8 +1051,35 @@ class Wechat4MentionTests(unittest.TestCase):
         self.body = "第一行\r\n第二行\r第三行"
         normalized = "第一行\n第二行\n第三行"
         result = self.compose()
-        self.assertEqual(result, ("\ufffc " + normalized, "@" + self.staff + " " + normalized))
+        self.assertEqual(result, ("\ufffc " + normalized, "@" + self.staff + "\u2005 " + normalized))
         self.assertEqual(self.auto.draft, result[0])
+        self.assertEqual(self.auto.sent, [])
+
+    def test_observed_echo_requires_u2005_then_ascii_space(self):
+        # 使用已捕获回显的精确码点；普通空格不能冒充真实 @ 后的 U+2005。
+        self.staff = "圆通快递"
+        self.candidates[0].Name = self.staff
+        draft, echo = self.compose()
+        self.assertEqual(draft, "\ufffc 转发工具联调测试，请忽略。")
+        self.assertEqual(echo, "@圆通快递\u2005 转发工具联调测试，请忽略。")
+        self.assertEqual(echo.count("\u2005"), 1)
+        self.assertNotIn("\u2005", draft)
+        self.assertNotEqual(echo, "@圆通快递  转发工具联调测试，请忽略。")
+        self.assertNotEqual(echo, "@圆通快递 转发工具联调测试，请忽略。")
+        self.assertEqual(self.auto.sent, [])
+
+    def test_mention_preserves_body_edge_whitespace_and_only_normalizes_newlines(self):
+        self.body = " \t第一行 \r\n第二行\r第三行\t  "
+        normalized = " \t第一行 \n第二行\n第三行\t  "
+        draft, echo = self.compose()
+        self.assertEqual(draft, "\ufffc " + normalized)
+        self.assertEqual(echo, "@" + self.staff + "\u2005 " + normalized)
+        self.assertEqual(self.auto.draft, draft)
+        self.assertEqual(self.typed[-1], " " + normalized)
+        self.assertEqual(echo.count("\u2005"), 1)
+        self.assertNotIn("\u2005", draft)
+        self.assertTrue(draft.endswith("\t  "))
+        self.assertTrue(echo.endswith("\t  "))
         self.assertEqual(self.auto.sent, [])
 
     def test_physical_at_wrong_draft_stops_before_typing_nickname(self):
