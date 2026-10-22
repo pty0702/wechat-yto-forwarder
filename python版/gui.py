@@ -2,10 +2,12 @@
 """微信与圆通客户管家转发工具：配置、运行控制与实时日志。"""
 
 import copy
+import ctypes
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
 import threading
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -16,12 +18,27 @@ from wechat_forwarder import DEFAULT_CONFIG, CONFIG_FILE, load_config, save_conf
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
+def initialize_dpi():
+    """在创建 Tk 前与 UIA 统一 DPI 模式，避免首次检查时窗口突然缩小。"""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
 class ConfigWindow(tk.Tk):
     def __init__(self):
+        initialize_dpi()
         super().__init__()
         self.title("微信 ⇄ 圆通客户管家 · 消息转发")
-        self.geometry("1000x800")
-        self.minsize(840, 680)
+        scale = max(1, self.winfo_fpixels("1i") / 96)
+        self.geometry(f"{round(1000 * scale)}x{round(800 * scale)}")
+        self.minsize(round(840 * scale), round(680 * scale))
         self.cfg = copy.deepcopy(DEFAULT_CONFIG)
         self._config_error = ""
         self._worker = None
@@ -35,6 +52,8 @@ class ConfigWindow(tk.Tk):
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Control-d>", lambda event: self.on_diagnose())
+        self.bind("<Control-t>", lambda event: self.on_preflight())
+        self.bind("<Control-Shift-T>", lambda event: self.on_send_check())
         self.after(100, self._drain_events)
         if self._config_error:
             self.after(150, self._show_config_error)
@@ -128,6 +147,9 @@ class ConfigWindow(tk.Tk):
         self.txt_block.grid(row=1, column=0, sticky="nsew")
         self.txt_at.grid(row=1, column=1, sticky="nsew", padx=(12, 0))
         self._configuration_widgets.extend([(self.txt_block, "normal"), (self.txt_at, "normal")])
+        send_check = ttk.Button(config, text="单次发送验收…", command=self.on_send_check)
+        send_check.grid(row=12, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        self._configuration_widgets.append((send_check, "normal"))
 
         logs.columnconfigure(0, weight=1)
         logs.rowconfigure(1, weight=1)
@@ -148,6 +170,8 @@ class ConfigWindow(tk.Tk):
         self.btn_save.pack(side="left", padx=6)
         self.btn_diagnose = ttk.Button(footer, text="窗口诊断 (Ctrl+D)", command=self.on_diagnose)
         self.btn_diagnose.pack(side="left")
+        self.btn_preflight = ttk.Button(footer, text="适配检查 (Ctrl+T)", command=self.on_preflight)
+        self.btn_preflight.pack(side="left", padx=6)
         self.btn_stop = ttk.Button(footer, text="停止", command=self.on_stop, state="disabled")
         self.btn_stop.pack(side="right", padx=(6, 0))
         self.btn_start = ttk.Button(footer, text="开始运行", command=self.on_start)
@@ -265,12 +289,101 @@ class ConfigWindow(tk.Tk):
             from windows_adapter import diagnose
             output = diagnose(
                 PROJECT_DIR / "diagnostics", self._queue_log,
-                enable_wechat=enable_wechat, stop_event=self._stop_event,
+                enable_wechat=enable_wechat, stop_event=self._stop_event, capture_delay=5,
             )
-            self._queue_log(f"[诊断] 已保存：{output}")
+            self._queue_log(f"[诊断] 已保存：{output}" if output else "[诊断] 已取消。")
 
         self._start_worker("诊断", action)
         self.var_status.set("正在临时启用微信4兼容并诊断" if enable_wechat else "正在读取窗口控件信息")
+
+    def on_preflight(self):
+        if self._worker or self._close_requested:
+            return
+        if self._config_error:
+            self._show_config_error()
+            return
+        try:
+            cfg = self._collect(live=True)
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("无法检查", str(exc), parent=self)
+            return
+        self._start_live_check(cfg)
+
+    def on_send_check(self):
+        if self._worker or self._close_requested:
+            return
+        if self._config_error:
+            self._show_config_error()
+            return
+        try:
+            cfg = self._collect(live=True)
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("无法验收", str(exc), parent=self)
+            return
+        from live_checks import TEST_MESSAGE
+        dialog = tk.Toplevel(self)
+        dialog.title("单次发送验收")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="向选定群发送一条测试消息，核对本账号的发送回显。",
+                  wraplength=520).pack(anchor="w", pady=(0, 10))
+        side = tk.StringVar(value="wx")
+        mention = tk.BooleanVar(value=False)
+        ttk.Radiobutton(body, text=f"微信：{cfg['wx_group']}", variable=side,
+                        value="wx").pack(anchor="w", pady=4)
+        ttk.Radiobutton(body, text=f"客户管家：{cfg['kf_group']}", variable=side,
+                        value="kf").pack(anchor="w", pady=4)
+        mention_box = ttk.Checkbutton(body, text=f"同时真实 @ 微信客服：{cfg['service_staff']}",
+                                      variable=mention)
+        mention_box.pack(anchor="w", pady=4)
+        preview = tk.StringVar()
+        ttk.Label(body, textvariable=preview, wraplength=520,
+                  padding=(0, 14)).pack(anchor="w")
+
+        def refresh_preview(*_):
+            if side.get() != "wx":
+                if mention.get():
+                    mention.set(False)
+                mention_box.configure(state="disabled")
+            else:
+                mention_box.configure(state="normal")
+            prefix = f"@{cfg['service_staff']} " if mention.get() else ""
+            preview.set(f"消息内容：\n{prefix}{TEST_MESSAGE}")
+
+        side.trace_add("write", refresh_preview)
+        mention.trace_add("write", refresh_preview)
+        refresh_preview()
+        ttk.Label(body, text="请保持两个目标群打开、输入框为空。验收结束后停止，并保存本地结果报告。",
+                  wraplength=520).pack(anchor="w", pady=(0, 14))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+
+        def confirm():
+            selected = side.get()
+            with_mention = mention.get()
+            dialog.destroy()
+            self._start_live_check(cfg, side=selected, mention=with_mention)
+
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="left")
+        ttk.Button(buttons, text="发送这一条", command=confirm).pack(side="right")
+        dialog.update_idletasks()
+        x = max(0, self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = max(0, self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+
+    def _start_live_check(self, cfg, side=None, mention=False):
+        self._stop_event = threading.Event()
+
+        def action():
+            from live_checks import run_live_check
+            run_live_check(cfg, PROJECT_DIR / "diagnostics", self._stop_event,
+                           self._queue_log, side=side, mention=mention)
+
+        self._start_worker("验收" if side else "检查", action)
+        self.var_status.set("正在验收单条发送" if side else "正在检查真实客户端适配，不发送消息")
 
     def _start_worker(self, kind, action):
         self._worker_kind = kind
@@ -293,12 +406,12 @@ class ConfigWindow(tk.Tk):
     def _set_busy(self, busy):
         for widget, normal_state in self._configuration_widgets:
             widget.configure(state="disabled" if busy else normal_state)
-        for button in (self.btn_start, self.btn_save, self.btn_reload, self.btn_diagnose):
+        for button in (self.btn_start, self.btn_save, self.btn_reload, self.btn_diagnose, self.btn_preflight):
             button.configure(state="disabled" if busy else "normal")
-        self.btn_stop.configure(state="normal" if busy and self._worker_kind in ("运行", "诊断") else "disabled")
+        self.btn_stop.configure(state="normal" if busy and self._worker_kind in ("运行", "诊断", "检查", "验收") else "disabled")
 
     def on_stop(self):
-        if self._worker and self._worker_kind in ("运行", "诊断"):
+        if self._worker and self._worker_kind in ("运行", "诊断", "检查", "验收"):
             self._stop_event.set()
             self.btn_stop.configure(state="disabled")
             self.var_status.set("正在停止，等待当前操作结束…")

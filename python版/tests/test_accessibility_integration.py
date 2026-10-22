@@ -1,6 +1,7 @@
 """模拟窗口、兼容上下文及文件输出，验证兼容开关接入和退出顺序。"""
 
 import json
+from io import StringIO
 from pathlib import Path
 import sys
 import threading
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import windows_adapter as adapter
+import wechat4_adapter
 from wechat_forwarder import validate_config
 from test_adapter import FakeAuto, profile
 
@@ -120,6 +122,50 @@ class AccessibilityIntegrationTests(unittest.TestCase):
         self.assertEqual(self.com.exit_count, 1)
         self.assertEqual(self.chat_adapter.call_args_list[0].kwargs["expected_pid"], 4321)
         self.assertEqual(self.events, ["com:enter", "wx:prepare", "kf:prepare", "com:exit"])
+
+    def test_wechat4_parser_selects_specialized_adapter_and_keeps_customer_adapter(self):
+        self.profile["wx"]["parser"] = "wechat4"
+        self.chat_adapter.side_effect = [self.kf]
+        with patch.object(wechat4_adapter, "Wechat4Adapter", return_value=self.wx) as specialized:
+            with adapter.create_live_adapters(self.cfg, self.logs.append) as adapters:
+                self.assertEqual(adapters, (self.wx, self.wx, self.kf, self.kf))
+        specialized.assert_called_once_with(self.auto, self.profile["wx"], "微信测试群", "微信",
+                                            self.logs.append, expected_pid=4321)
+        self.chat_adapter.assert_called_once_with(self.auto, self.profile["kf"], "客户管家测试群",
+                                                 "客户管家", self.logs.append)
+        self.assertEqual(self.events, ["com:enter", "wx:prepare", "kf:prepare", "com:exit"])
+        self.factory.assert_not_called()
+
+    def test_wechat4_mention_mode_allows_keywords_without_legacy_token_selectors(self):
+        self.profile["wx"].update(parser="wechat4", mention_mode="wechat4",
+                                  mention_allow_duplicate_names=True)
+        self.cfg["at_keywords"] = ["人工"]
+        self.chat_adapter.side_effect = [self.kf]
+        with patch.object(wechat4_adapter, "Wechat4Adapter", return_value=self.wx) as specialized:
+            with adapter.create_live_adapters(self.cfg, self.logs.append):
+                pass
+        specialized.assert_called_once()
+        self.wx.prepare.assert_called_once()
+        self.kf.prepare.assert_called_once()
+
+    def test_wechat4_keywords_without_mention_mode_fail_before_automation(self):
+        self.profile["wx"]["parser"] = "wechat4"
+        self.cfg["at_keywords"] = ["人工"]
+        with self.assertRaisesRegex(adapter.AdapterConfigurationError, "真实 @ 控件"):
+            with adapter.create_live_adapters(self.cfg, self.logs.append):
+                self.fail("未启用真实提及适配时不能运行 @ 规则")
+        self.automation.assert_not_called()
+        self.chat_adapter.assert_not_called()
+        self.factory.assert_not_called()
+
+    def test_mention_mode_does_not_bypass_parser_requirement(self):
+        # 即使调用方替换配置加载器，factory 仍须同时检查解析器与模式。
+        self.profile["wx"]["mention_mode"] = "wechat4"
+        self.cfg["at_keywords"] = ["人工"]
+        with self.assertRaisesRegex(adapter.AdapterConfigurationError, "真实 @ 控件"):
+            with adapter.create_live_adapters(self.cfg, self.logs.append):
+                self.fail("普通解析器不能借用微信 4 的 @ 模式")
+        self.automation.assert_not_called()
 
     def test_live_enabled_enters_once_before_prepare_and_exits_before_com(self):
         self.cfg["wechat_accessibility"] = True
@@ -293,6 +339,58 @@ class AccessibilityIntegrationTests(unittest.TestCase):
         for invalid in ("false", "true", "0", "1", 0, 1, -1, 0.0, 1.0, None, [], {}):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 validate_config({"wechat_accessibility": invalid})
+
+
+class ProfileParserTests(unittest.TestCase):
+    def read_profile(self, config):
+        with patch.object(Path, "open", return_value=StringIO(json.dumps(config))):
+            return adapter.load_profile("模拟配置.json")
+
+    def test_wechat4_mention_mode_and_explicit_duplicate_choice_are_accepted(self):
+        for allowed in (False, True):
+            config = {"wx": profile(), "kf": profile()}
+            config["wx"].update(parser="wechat4", mention_mode="wechat4",
+                                mention_allow_duplicate_names=allowed)
+            with self.subTest(allowed=allowed):
+                loaded = self.read_profile(config)
+                self.assertEqual(loaded["wx"]["mention_mode"], "wechat4")
+                self.assertIs(loaded["wx"]["mention_allow_duplicate_names"], allowed)
+
+    def test_invalid_mention_modes_are_rejected(self):
+        for invalid in ("", "text", "wechat3", True, False, 0, 1, [], {}):
+            config = {"wx": profile(), "kf": profile()}
+            config["wx"].update(parser="wechat4", mention_mode=invalid)
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    adapter.AdapterConfigurationError, "mention_mode"):
+                self.read_profile(config)
+
+    def test_mention_mode_requires_wechat4_parser_on_wechat_side(self):
+        for side, parser in (("wx", "selectors"), ("wx", "yto"),
+                             ("kf", "selectors"), ("kf", "yto")):
+            config = {"wx": profile(), "kf": profile()}
+            config[side].update(parser=parser, mention_mode="wechat4")
+            with self.subTest(side=side, parser=parser), self.assertRaisesRegex(
+                    adapter.AdapterConfigurationError, "mention_mode"):
+                self.read_profile(config)
+
+    def test_duplicate_name_permission_requires_actual_boolean_on_both_sides(self):
+        for side in ("wx", "kf"):
+            for invalid in ("true", "false", 0, 1, 0.0, 1.0, None, [], {}):
+                config = {"wx": profile(), "kf": profile()}
+                config[side]["mention_allow_duplicate_names"] = invalid
+                with self.subTest(side=side, invalid=invalid), self.assertRaisesRegex(
+                        adapter.AdapterConfigurationError, "mention_allow_duplicate_names"):
+                    self.read_profile(config)
+
+    def test_unknown_parser_is_rejected_on_either_side_before_automation(self):
+        for side in ("wx", "kf"):
+            config = {"wx": profile(), "kf": profile()}
+            config[side]["parser"] = "unknown-parser"
+            with self.subTest(side=side), patch.object(Path, "open", return_value=StringIO(json.dumps(config))), \
+                    patch.object(adapter, "_automation") as automation:
+                with self.assertRaisesRegex(adapter.AdapterConfigurationError, "解析器不受支持"):
+                    adapter.load_profile("模拟配置.json")
+                automation.assert_not_called()
 
 
 class DraftReadinessTests(unittest.TestCase):

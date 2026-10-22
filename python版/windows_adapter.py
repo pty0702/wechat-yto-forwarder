@@ -47,6 +47,8 @@ def matches(control, selector):
     if not any(key in selector for key in allowed - {"depth", "index"}):
         raise AdapterConfigurationError("选择器至少需要名称、类型或控件标识")
     for key, prop in properties.items():
+        if key not in selector and key + "_regex" not in selector:
+            continue
         value = str(getattr(control, prop, "") or "")
         if key in selector and value != str(selector[key]):
             return False
@@ -117,13 +119,29 @@ _TIME = re.compile(r"(?:(?:今天|昨天|\d{1,2}月\d{1,2}日)\s*)?\d{1,2}:\d{2}
 def parse_message(row, profile, namespace):
     parser = profile.get("parser", "selectors")
     if parser == "yto":
-        # 客户管家 2.0 的消息行：可选日期、头像组、发送者、时间、正文组。
-        children = row.GetChildren()
+        # 客户管家 WebView2 布局：消息编号外壳内的 news-box 分为发送者行和正文。
+        boxes = [node for node in walk(row, 10)
+                 if node.ControlTypeName == "GroupControl" and "news-box" in str(node.ClassName).split()]
+        if boxes:
+            if len(boxes) != 1:
+                raise AdapterConfigurationError("客户管家消息内有多个正文容器，无法确认来源")
+            sections = boxes[0].GetChildren()
+            bodies = [node for node in sections if "text-content" in str(node.ClassName).split()]
+            headers = [node for node in sections if node not in bodies and any(
+                child.ControlTypeName == "TextControl" for child in node.GetChildren())]
+            if len(bodies) != 1 or len(headers) != 1:
+                raise AdapterConfigurationError("客户管家发送者或正文分区不唯一")
+            children = headers[0].GetChildren()
+            body = bodies[0]
+        else:
+            # 保留旧的直接子控件布局，兼容已验证配置。
+            children = row.GetChildren()
+            groups = [n for n in children if n.ControlTypeName == "GroupControl"]
+            body = groups[-1] if groups else None
         names = [n.Name for n in children if n.ControlTypeName == "TextControl" and n.Name and not _TIME.fullmatch(n.Name.strip())]
-        groups = [n for n in children if n.ControlTypeName == "GroupControl"]
-        if len(names) != 1 or not groups:
+        if len(names) != 1 or body is None:
             raise AdapterConfigurationError("客户管家消息行结构发生变化，无法唯一识别发送者")
-        sender, body = names[0], groups[-1]
+        sender = names[0]
         content = _text(body)
         # 卡片中的摘要可能截断，不能当作机器人完整文本回复搬运。
         kind = "media" if any(n.ControlTypeName in {"ImageControl", "ButtonControl"}
@@ -166,8 +184,23 @@ def load_profile(path):
             raise AdapterConfigurationError(f"{side}.self_names 必须填写本账号的完整群昵称列表")
         if item.get("parser", "selectors") == "selectors" and not item.get("sender"):
             raise AdapterConfigurationError(f"{side} 缺少 sender 选择器")
+        if item.get("parser", "selectors") not in {"selectors", "yto", "wechat4"}:
+            raise AdapterConfigurationError(f"{side} 消息解析器不受支持")
+        if item.get("parser") == "wechat4" and side != "wx":
+            raise AdapterConfigurationError("wechat4 解析器只能用于微信端")
+        mention_mode = item.get("mention_mode")
+        if mention_mode is not None and (mention_mode != "wechat4" or side != "wx"
+                                         or item.get("parser") != "wechat4"):
+            raise AdapterConfigurationError("mention_mode 仅支持微信端 wechat4 解析器的 wechat4 模式")
+        if not isinstance(item.get("mention_allow_duplicate_names", False), bool):
+            raise AdapterConfigurationError("mention_allow_duplicate_names 必须为布尔值")
         if item.get("id_attribute", "runtime_id") not in {"runtime_id", "automation_id"}:
             raise AdapterConfigurationError(f"{side}.id_attribute 无效")
+        empty_leaf = item.setdefault("text_pattern_empty_leaf", False)
+        if not isinstance(empty_leaf, bool):
+            raise AdapterConfigurationError(f"{side}.text_pattern_empty_leaf 必须为布尔值")
+        if empty_leaf and (item.get("parser") != "yto" or item.get("process_name") != "YtoChatApp.exe"):
+            raise AdapterConfigurationError(f"{side}.text_pattern_empty_leaf 仅允许已核对的客户管家 yto 配置")
     return profile
 
 
@@ -229,6 +262,15 @@ class WindowsChatAdapter:
         if pattern:
             value = pattern.DocumentRange.GetText(-1)
             if "\ufffc" in value:
+                # 已核对的客户管家空叶以单个替代字符表示空输入；不适用于其它嵌入对象。
+                if (self.profile.get("text_pattern_empty_leaf", False) is True
+                        and self.profile.get("parser") == "yto"
+                        and self.profile.get("process_name") == "YtoChatApp.exe"
+                        and value == "\ufffc"
+                        and edit.ControlTypeName == "GroupControl"
+                        and edit.AutomationId == "edit-content"
+                        and edit.GetChildren() == []):
+                    return ""
                 raise AdapterConfigurationError("输入框包含 UIA 嵌入对象占位符，无法确认完整草稿；请核对输入控件适配")
             # 个别控件会追加结构性的段落结束符，必须经诊断确认后显式配置。
             suffix = self.profile.get("text_pattern_suffix", "")
@@ -271,6 +313,26 @@ class WindowsChatAdapter:
             raise AdapterConfigurationError("send_keys 只允许 Enter 或 Ctrl+Enter")
         self.auto.SendKeys(key, waitTime=0.1)
 
+    def _compose_mention(self, edit, staff, text):
+        """返回完整草稿及预期发送回显，富文本客户端可分别校验两者。"""
+        if not self.profile.get("mention_item") or not self.profile.get("mention_token"):
+            raise AdapterConfigurationError("尚未配置真实 @ 的候选控件和选中标记，不能以普通文本代替 @")
+        self._type(edit, "@" + staff)
+        candidate = select(self.window, _format(self.profile["mention_item"], staff=staff), "@客服候选项")
+        if str(candidate.Name or "").strip() != staff:
+            raise AdapterConfigurationError("@候选项不是配置的客服昵称")
+        self._bind()
+        candidate.Click(waitTime=0.1)
+        select(self.window, _format(self.profile["mention_token"], staff=staff), "已选中的真实@标记")
+        self._focus(edit)
+        prefix = self._value(edit)
+        if "@" + staff not in prefix:
+            raise AdapterConfigurationError("@客服标记未进入输入框")
+        self.auto.SendKeys("{Ctrl}{End}", waitTime=0.05)
+        self._type(edit, " " + text)
+        expected = _normalized(prefix + " " + text)
+        return expected, expected
+
     def _send(self, text, staff=None):
         attempted = False
         edited = False
@@ -289,25 +351,13 @@ class WindowsChatAdapter:
             before = {msg.message_id for msg in before_rows}
             anchor = before_rows[-1].message_id
             self._focus(edit)
+            if self._value(edit):
+                raise RetryableSendError("读取消息期间输入框出现新草稿，已停止本次输入，不会覆盖")
             expected = _normalized(text)
+            echo_expected = expected
             if staff:
-                if not self.profile.get("mention_item") or not self.profile.get("mention_token"):
-                    raise AdapterConfigurationError("尚未配置真实 @ 的候选控件和选中标记，不能以普通文本代替 @")
                 edited = True
-                self._type(edit, "@" + staff)
-                candidate = select(self.window, _format(self.profile["mention_item"], staff=staff), "@客服候选项")
-                if str(candidate.Name or "").strip() != staff:
-                    raise AdapterConfigurationError("@候选项不是配置的客服昵称")
-                self._bind()
-                candidate.Click(waitTime=0.1)
-                select(self.window, _format(self.profile["mention_token"], staff=staff), "已选中的真实@标记")
-                self._focus(edit)
-                prefix = self._value(edit)
-                if "@" + staff not in prefix:
-                    raise AdapterConfigurationError("@客服标记未进入输入框")
-                self.auto.SendKeys("{Ctrl}{End}", waitTime=0.05)
-                self._type(edit, " " + text)
-                expected = _normalized(prefix + " " + text)
+                expected, echo_expected = self._compose_mention(edit, staff, text)
             else:
                 pattern = edit.GetPattern(self.auto.PatternId.ValuePattern)
                 edited = True
@@ -323,12 +373,16 @@ class WindowsChatAdapter:
             self._enter(edit)
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
+                # 发送后客户端可能稍晚才清空草稿；先等清空，避免带草稿进入微信多选。
+                if self._value(edit):
+                    time.sleep(0.15)
+                    continue
                 after = self._rows()
                 anchors = [i for i, row in enumerate(after) if row.message_id == anchor]
                 # 控件整体重建后同文历史可能获得新ID；没有原尾锚点就不能证明追加。
                 if len(anchors) == 1 and not self._value(edit):
                     for row in after[anchors[0] + 1:]:
-                        if row.message_id not in before and row.is_self and _normalized(row.content) == expected:
+                        if row.message_id not in before and row.is_self and _normalized(row.content) == echo_expected:
                             return
                 time.sleep(0.15)
             raise SendUncertainError("发送后未找到本账号的完整消息回显，请人工核对；已停止，避免重复发送")
@@ -370,7 +424,10 @@ def create_live_adapters(cfg, log=print):
     if not profile_path:
         raise AdapterConfigurationError("请先选择客户端适配 JSON 文件")
     profile = load_profile(profile_path)
-    if cfg.get("at_keywords") and not all(profile["wx"].get(key) for key in ("mention_item", "mention_token")):
+    wx_mention = (profile["wx"].get("parser") == "wechat4"
+                  and profile["wx"].get("mention_mode") == "wechat4")
+    if (cfg.get("at_keywords") and not wx_mention
+            and not all(profile["wx"].get(key) for key in ("mention_item", "mention_token"))):
         raise AdapterConfigurationError("设置了 @客服词，但微信适配配置尚未提供真实 @ 控件")
     auto = _automation()
     if not isinstance(cfg.get("wechat_accessibility", False), bool):
@@ -380,17 +437,133 @@ def create_live_adapters(cfg, log=print):
         pid = wx_window.ProcessId
         if cfg.get("wechat_accessibility", False):
             contexts.enter_context(_wechat_session(pid, log))
-        wx = WindowsChatAdapter(auto, profile["wx"], cfg["wx_group"], "微信", log, expected_pid=pid)
+        wx_class = WindowsChatAdapter
+        if profile["wx"].get("parser") == "wechat4":
+            from wechat4_adapter import Wechat4Adapter
+            wx_class = Wechat4Adapter
+        wx = wx_class(auto, profile["wx"], cfg["wx_group"], "微信", log, expected_pid=pid)
         kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
         wx.prepare()
         kf.prepare()
         yield wx, wx, kf, kf
 
 
-def diagnose(output_dir, log=print, enable_wechat=False, stop_event=None):
+def _diagnostic_read(record, key, read):
+    """各字段独立读取，某个可选 UIA 属性失败不遮蔽其它证据。"""
+    try:
+        record[key] = read()
+    except Exception as exc:
+        record[key + "_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _diagnostic_control(node):
+    """身份摘要不取 Name，避免父级或焦点控件名称夹带聊天正文。"""
+    if node is None:
+        return None
+    record = {}
+    for key, attribute in (("type", "ControlTypeName"), ("automation_id", "AutomationId"),
+                           ("process_id", "ProcessId"), ("native_window_handle", "NativeWindowHandle")):
+        _diagnostic_read(record, key, lambda attribute=attribute: getattr(node, attribute))
+    _diagnostic_read(record, "runtime_id", lambda: list(node.GetRuntimeId()))
+    return record
+
+
+def _diagnostic_parents(node):
+    parents = []
+    current = node
+    for _ in range(8):
+        try:
+            current = current.GetParentControl()
+        except Exception as exc:
+            parents.append({"parent_error": f"{type(exc).__name__}: {exc}"})
+            break
+        if current is None:
+            break
+        parents.append(_diagnostic_control(current))
+    return parents
+
+
+def _diagnostic_rectangles(text_range):
+    return [[r.left, r.top, r.right, r.bottom] for r in text_range.GetBoundingRectangles()]
+
+
+def _diagnostic_compare(text_range, source, target_range, target):
+    # uiautomation 2.0.29 的 CompareEndpoints 错把包装对象传给 COM；仅诊断绕过该包装。
+    return text_range.textRange.CompareEndpoints(source, target_range.textRange, target)
+
+
+def _diagnostic_range(auto, text_range, document_range):
+    record = {}
+    _diagnostic_read(record, "enclosing_element", lambda: _diagnostic_control(text_range.GetEnclosingControl()))
+    _diagnostic_read(record, "rectangles", lambda: _diagnostic_rectangles(text_range))
+    endpoints = auto.TextPatternRangeEndpoint
+    comparisons = {}
+    if document_range is not None:
+        for source_name, source in (("start", endpoints.Start), ("end", endpoints.End)):
+            for target_name, target in (("start", endpoints.Start), ("end", endpoints.End)):
+                _diagnostic_read(comparisons, source_name + "_to_document_" + target_name,
+                                 lambda source=source, target=target:
+                                 _diagnostic_compare(text_range, source, document_range, target))
+        record["compare_to_document"] = comparisons
+    _diagnostic_read(record, "is_degenerate", lambda:
+                     _diagnostic_compare(text_range, endpoints.Start, text_range, endpoints.End) == 0)
+    start = comparisons.get("start_to_document_start")
+    end = comparisons.get("end_to_document_end")
+    inside = start is not None and end is not None and start >= 0 and end <= 0
+    record["inside_document"] = inside
+    # Chromium 的 GetSelection 可能给出同一网页其它区域的选区；全文仅存本输入框范围。
+    try:
+        text = text_range.GetText(-1)
+        record["text_length"] = len(text)
+        if inside:
+            record["text"] = text
+    except Exception as exc:
+        record["text_error"] = f"{type(exc).__name__}: {exc}"
+    return record
+
+
+def _diagnostic_caret(auto, node, document_range):
+    record = {"raw_com": True, "supported": None}
+    try:
+        # 当前 uiautomation 的 TextPattern2 包装没有 GetCaretRange，直接访问类型化 COM。
+        raw = node.Element.GetCurrentPattern(auto.PatternId.TextPattern2)
+        record["supported"] = bool(raw)
+        if not raw:
+            return record
+        pattern = raw.QueryInterface(auto.GetPatternIdInterface(auto.PatternId.TextPattern2))
+        active, caret = pattern.GetCaretRange()
+        record["is_active"] = bool(active)
+        record["range"] = (_diagnostic_range(auto, auto.TextRange(textRange=caret), document_range)
+                           if caret else None)
+    except Exception as exc:
+        record["error"] = f"{type(exc).__name__}: {exc}"
+    return record
+
+
+def _diagnostic_input(auto, node, record, text):
+    _diagnostic_read(record, "is_keyboard_focusable", lambda: node.IsKeyboardFocusable)
+    _diagnostic_read(record, "has_keyboard_focus", lambda: node.HasKeyboardFocus)
+    _diagnostic_read(record, "parent_chain", lambda: _diagnostic_parents(node))
+    document = None
+    if text is not None:
+        try:
+            document = text.DocumentRange
+        except Exception as exc:
+            record["document_range_error"] = f"{type(exc).__name__}: {exc}"
+        _diagnostic_read(record, "selection", lambda: [
+            _diagnostic_range(auto, selected, document) for selected in text.GetSelection()
+        ])
+    else:
+        record["selection"] = None
+    _diagnostic_read(record, "text_pattern2_caret", lambda: _diagnostic_caret(auto, node, document))
+
+
+def diagnose(output_dir, log=print, enable_wechat=False, stop_event=None, capture_delay=0):
     """读取目标窗口；可选临时启用微信控件，完成或中止时恢复，不发送消息。"""
     if not isinstance(enable_wechat, bool):
         raise ValueError("微信兼容开关必须为布尔值")
+    if isinstance(capture_delay, bool) or not isinstance(capture_delay, (int, float)) or not 0 <= capture_delay < float("inf"):
+        raise ValueError("诊断延迟必须为有限非负秒数")
     auto = _automation()
     output = Path(output_dir).resolve()
     project = Path(__file__).resolve().parent.parent
@@ -401,14 +574,28 @@ def diagnose(output_dir, log=print, enable_wechat=False, stop_event=None):
     with auto.UIAutomationInitializerInThread(), ExitStack() as contexts:
         if stop_event is not None and stop_event.is_set():
             return None
+        if capture_delay:
+            log(f"[诊断] {capture_delay:g}秒后读取，请将焦点置于待检查输入框；不会键入或发送")
+            if stop_event is not None:
+                if stop_event.wait(capture_delay):
+                    return None
+            else:
+                time.sleep(capture_delay)
+        report["capture_time"] = datetime.now().isoformat(timespec="seconds")
         if enable_wechat:
             wx_window = select(auto.GetRootControl(), {"name": "微信", "depth": 1}, "微信窗口")
             contexts.enter_context(_wechat_session(wx_window.ProcessId, log))
-        for window in auto.GetRootControl().GetChildren():
+        _diagnostic_read(report, "focused_control", lambda: _diagnostic_control(auto.GetFocusedControl()))
+        _diagnostic_read(report, "foreground_control", lambda: _diagnostic_control(auto.GetForegroundControl()))
+        root_windows = auto.GetRootControl().GetChildren()
+        target_pids = {window.ProcessId for window in root_windows
+                       if window.Name in {"微信", "WeChat", "客户管家"}}
+        for window in root_windows:
             if stop_event is not None and stop_event.is_set():
                 report["cancelled"] = True
                 break
-            if window.Name not in {"微信", "WeChat", "客户管家"}:
+            # 微信提及候选是独立同进程弹窗，不能只按主窗口标题筛选。
+            if window.ProcessId not in target_pids:
                 continue
             nodes = []
             try:
@@ -418,33 +605,46 @@ def diagnose(output_dir, log=print, enable_wechat=False, stop_event=None):
                         report["cancelled"] = True
                         break
                     node, depth = stack.pop()
-                    record = {"depth": depth, "type": node.ControlTypeName,
-                              "name": node.Name, "automation_id": node.AutomationId,
-                              "class_name": node.ClassName}
+                    record = {"depth": depth}
+                    for key, attribute in (("type", "ControlTypeName"), ("name", "Name"),
+                                           ("automation_id", "AutomationId"), ("class_name", "ClassName")):
+                        _diagnostic_read(record, key, lambda attribute=attribute: getattr(node, attribute))
+                    _diagnostic_read(record, "runtime_id", lambda: list(node.GetRuntimeId()))
+                    _diagnostic_read(record, "rectangle", lambda: [
+                        node.BoundingRectangle.left, node.BoundingRectangle.top,
+                        node.BoundingRectangle.right, node.BoundingRectangle.bottom])
+                    _diagnostic_read(record, "help_text", lambda: node.HelpText)
+                    _diagnostic_read(record, "full_description", lambda:
+                                     node.GetPropertyValue(auto.PropertyId.FullDescriptionProperty))
                     try:
-                        rect = node.BoundingRectangle
-                        record.update(runtime_id=list(node.GetRuntimeId()),
-                                      rectangle=[rect.left, rect.top, rect.right, rect.bottom],
-                                      help_text=node.HelpText,
-                                      full_description=node.GetPropertyValue(auto.PropertyId.FullDescriptionProperty))
                         legacy = node.GetPattern(auto.PatternId.LegacyIAccessiblePattern)
                         if legacy:
-                            record["legacy_description"] = legacy.Description
-                            record["legacy_value"] = legacy.Value
-                        if node.AutomationId in {"chat_input_field", "edit-content"} or node.ControlTypeName == "ListItemControl":
+                            _diagnostic_read(record, "legacy_description", lambda: legacy.Description)
+                            _diagnostic_read(record, "legacy_value", lambda: legacy.Value)
+                    except Exception as exc:
+                        record["legacy_pattern_error"] = str(exc)
+                    is_input = record.get("automation_id") in {"chat_input_field", "edit-content"}
+                    if is_input or record.get("type") == "ListItemControl":
+                        try:
                             value = node.GetPattern(auto.PatternId.ValuePattern)
+                            _diagnostic_read(record, "value_pattern", lambda: value.Value if value else None)
+                        except Exception as exc:
+                            record["value_pattern_error"] = str(exc)
+                        text = None
+                        try:
                             text = node.GetPattern(auto.PatternId.TextPattern)
-                            record["value_pattern"] = value.Value if value else None
-                            record["text_pattern"] = text.DocumentRange.GetText(-1) if text else None
+                            _diagnostic_read(record, "text_pattern", lambda: text.DocumentRange.GetText(-1) if text else None)
                             if text:
-                                record["text_rectangles"] = [[r.left, r.top, r.right, r.bottom]
-                                                             for r in text.DocumentRange.GetBoundingRectangles()]
-                    except Exception as detail_error:
-                        record["detail_error"] = str(detail_error)
+                                _diagnostic_read(record, "text_rectangles", lambda: _diagnostic_rectangles(text.DocumentRange))
+                        except Exception as exc:
+                            record["text_pattern_error"] = str(exc)
+                        if is_input:
+                            _diagnostic_input(auto, node, record, text)
                     nodes.append(record)
                     if depth < 40:
                         stack.extend((child, depth + 1) for child in reversed(node.GetChildren()))
-                report["windows"].append({"title": window.Name, "nodes": nodes, "truncated": bool(stack)})
+                report["windows"].append({"title": window.Name, "process_id": window.ProcessId,
+                                          "nodes": nodes, "truncated": bool(stack)})
             except Exception as exc:
                 report["windows"].append({"title": window.Name, "nodes": nodes, "error": str(exc)})
     path = output / ("windows-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".json")
