@@ -3,3 +3,10 @@ python版/_backup_machine_path_*.txt
 # Python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+diagnostics/
+logs/
+python版/config.json
+python版/config.json.*
+python版/profiles/local*.json

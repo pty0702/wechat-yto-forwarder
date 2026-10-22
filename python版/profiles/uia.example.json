@@ -1,0 +1,34 @@
+{
+  "_说明": "选择器格式示例，不是已验证的微信4.1适配配置。复制成local.json并按诊断修改，填写本账号在两边的群昵称。微信只有空窗格时修改选择器无效。",
+  "wx": {
+    "window": {"name": "微信", "depth": 1},
+    "group_title": {"type": "TextControl", "name": "{group}"},
+    "messages": {"type": "ListControl", "name": "消息"},
+    "message_item": {"type": "ListItemControl", "depth": 1},
+    "parser": "selectors",
+    "sender": {"type": "ButtonControl", "depth": 6},
+    "input": {"type": "EditControl", "name": "{group}"},
+    "self_names": ["请填写微信本账号在该群的完整昵称"],
+    "id_attribute": "runtime_id",
+    "send_keys": "{Enter}",
+    "newline_keys": "{Shift}{Enter}",
+    "mention_item": null,
+    "mention_token": null
+  },
+  "kf": {
+    "window": {"name": "客户管家", "automation_id": "FrmMainView", "depth": 1},
+    "process_name": "YtoChatApp.exe",
+    "group_title": [
+      {"type": "GroupControl", "name": "点击复制"},
+      {"type": "TextControl", "name": "{group}", "depth": 1}
+    ],
+    "messages": {"automation_id": "imLayout"},
+    "message_item": {"type": "GroupControl", "automation_id_regex": "[0-9]{15,22}"},
+    "parser": "yto",
+    "input": {"automation_id": "edit-content"},
+    "self_names": ["请填写客户管家本账号的完整昵称"],
+    "id_attribute": "automation_id",
+    "send_keys": "{Enter}",
+    "newline_keys": "{Ctrl}{Enter}"
+  }
+}
