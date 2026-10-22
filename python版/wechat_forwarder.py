@@ -12,22 +12,28 @@
 方向② 客户管家 → 微信：
     只搬"程序转发进去的那条消息"引来的小圆回复：
       待回复队列非空时，小圆的新回复按运单号关联（回复不带单号则按
-      先进先出对应最早一条等待）→ 搬回微信群并结束该条等待；
+      先进先出对应最早一条等待）→ 搬回微信群并刷新静默计时；
       队列为空时小圆回复别人的消息、群里任何其他信息一律不搬。
     超时：小圆正常两三秒回复；转发后 30 秒未等到对应回复即重置该条
       等待（打日志提醒），程序继续监听新消息，迟到的回复不再搬运。
 
-窗口对接层（读取/发送微信与客户管家消息）在此定义接口，
-当前提供 MockAdapter 演示实现；真实对接后续接入 uiautomation。
+窗口适配层负责首次历史快照和稳定的消息事件编号。无单号回复采用最早等待
+规则，无法仅凭文本证明它属于哪条请求；多人同时向机器人提问时存在歧义。
 """
 
+import copy
 import json
+import math
 import os
 import re
+import tempfile
+import threading
 import time
+import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -41,26 +47,87 @@ DEFAULT_CONFIG = {
     "block_keywords": [],  # 屏蔽词：YT 消息命中即忽略
     "at_keywords": [],     # @客服词句：YT 消息命中即 @客服
     "service_staff": "",   # 客服名：@ 时 @ 的人，后期自己填
-    "bot_name": "小圆",    # 客户管家里只搬这个机器人（模糊匹配发送者）
+    "bot_name": "小圆-总公司",  # 必须与机器人显示的完整名称一致
     "poll_interval": 3,    # 轮询间隔（秒）
     "reset_seconds": 30,   # 转发后 30 秒未等到小圆回复 → 重置该条等待
+    "mode": "demo",       # 默认演示；真实运行前另行验证窗口配置
+    "wx_profile": {},
+    "kf_profile": {},
 }
 
 
-def load_config() -> dict:
-    cfg = dict(DEFAULT_CONFIG)
-    if os.path.exists(CONFIG_FILE):
+def validate_config(cfg: dict, live: bool = False) -> dict:
+    """返回独立、规范化的配置；保留旧配置及适配器的额外字段。"""
+    if not isinstance(cfg, dict):
+        raise ValueError("配置必须是 JSON 对象")
+    normalized = copy.deepcopy(DEFAULT_CONFIG)
+    normalized.update(copy.deepcopy(cfg))
+    for key in ("wx_group", "kf_group", "service_staff", "bot_name", "mode"):
+        value = normalized[key]
+        if not isinstance(value, str):
+            raise ValueError(f"配置项 {key} 必须是字符串")
+        normalized[key] = value.strip()
+    if normalized["mode"] not in ("demo", "live"):
+        raise ValueError("运行模式只能是 demo 或 live")
+    if not normalized["bot_name"]:
+        raise ValueError("机器人完整名称不能为空")
+    for key in ("block_keywords", "at_keywords"):
+        value = normalized[key]
+        if not isinstance(value, list) or any(not isinstance(word, str) for word in value):
+            raise ValueError(f"配置项 {key} 必须是字符串列表")
+        normalized[key] = list(dict.fromkeys(word.strip() for word in value if word.strip()))
+    for key in ("poll_interval", "reset_seconds"):
+        value = normalized[key]
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ValueError(f"配置项 {key} 必须是大于零的秒数")
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
-        except (json.JSONDecodeError, OSError):
-            pass  # 配置损坏时按默认值启动，由 GUI 重新保存覆盖
-    return cfg
+            number = float(value)
+        except (ValueError, OverflowError) as exc:
+            raise ValueError(f"配置项 {key} 必须是大于零的秒数") from exc
+        if not math.isfinite(number) or number <= 0:
+            raise ValueError(f"配置项 {key} 必须是有限且大于零的秒数")
+        normalized[key] = number
+    for key in ("wx_profile", "kf_profile"):
+        if not isinstance(normalized[key], dict):
+            raise ValueError(f"配置项 {key} 必须是对象")
+    if live:
+        if not normalized["wx_group"] or not normalized["kf_group"]:
+            raise ValueError("真实运行前必须填写微信群名和客户管家客服群名")
+        if normalized["at_keywords"] and not normalized["service_staff"]:
+            raise ValueError("配置了 @客服词句时，必须填写客服完整名称")
+    return normalized
+
+
+def load_config() -> dict:
+    """首次使用返回默认配置，已有配置损坏时明确报错并保留原文件。"""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8-sig") as stream:
+            cfg = json.load(stream)
+    except FileNotFoundError:
+        return validate_config({})
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise ValueError(f"配置文件无法解析，请修复后重试：{CONFIG_FILE}") from exc
+    return validate_config(cfg)
 
 
 def save_config(cfg: dict) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    """同目录写入并原子替换，写入失败时保留原配置。"""
+    normalized = validate_config(cfg)
+    filename = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", delete=False,
+            dir=os.path.dirname(os.path.abspath(CONFIG_FILE)), prefix=".config-", suffix=".tmp",
+        ) as stream:
+            filename = stream.name
+            json.dump(normalized, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(filename, CONFIG_FILE)
+    finally:
+        if filename is not None and os.path.exists(filename):
+            os.unlink(filename)
 
 
 # ---------------------------------------------------------------------------
@@ -69,14 +136,22 @@ def save_config(cfg: dict) -> None:
 
 @dataclass
 class Message:
-    """一条窗口消息：发送者 + 内容。"""
+    """一条消息事件；适配器重复读取同一事件时必须复用 message_id。"""
     sender: str
     content: str
     ts: float = field(default_factory=time.time)
+    message_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    is_self: bool = False
+    kind: str = "text"
+
+    def __post_init__(self):
+        if not isinstance(self.message_id, str) or not self.message_id:
+            raise ValueError("消息事件编号不能为空")
 
     @property
     def fingerprint(self) -> str:
-        return f"{self.sender}|{self.content}"
+        """兼容原属性名，身份不再取决于消息文本。"""
+        return self.message_id
 
 
 class Verdict(Enum):
@@ -86,13 +161,12 @@ class Verdict(Enum):
 
 
 # 圆通运单号：YT + 10~15 位数字（常见 13 位）
-WAYBILL_RE = re.compile(r"YT\d{10,15}", re.IGNORECASE)
+WAYBILL_RE = re.compile(r"YT[0-9]{10,15}(?![0-9])", re.IGNORECASE)
 
 
 def starts_with_waybill(text: str) -> bool:
     """消息是否以 YT 单号开头（允许前导空白）。"""
-    m = WAYBILL_RE.search(text.lstrip()[:20])
-    return bool(m and text.lstrip().upper().startswith(m.group().upper()))
+    return bool(WAYBILL_RE.match(text.lstrip()))
 
 
 def extract_waybill(text: str) -> Optional[str]:
@@ -116,6 +190,8 @@ def _is_media(text: str) -> bool:
 
 def classify(msg: Message, cfg: dict) -> Verdict:
     """方向① 的核心判定：按 屏蔽词 → @客服词 → 正常转发 的顺序。"""
+    if msg.is_self or msg.kind != "text" or _is_media(msg.content):
+        return Verdict.IGNORE
     if not starts_with_waybill(msg.content):
         return Verdict.IGNORE          # 不带 YT 开头：图片、闲聊等一律忽略
     if hit_any(msg.content, cfg.get("block_keywords", [])):
@@ -132,18 +208,21 @@ def classify(msg: Message, cfg: dict) -> Verdict:
 class PendingQueue:
     """转发到客户管家后等待小圆回复的记录；超过 reset_seconds 重置。"""
 
-    def __init__(self, reset_seconds: int):
+    def __init__(self, reset_seconds: float):
         self.reset_seconds = reset_seconds
         self._items: Dict[str, float] = {}   # 运单号 -> 转发时间戳（插入顺序即先进先出）
 
     def add(self, waybill: str) -> None:
-        self._items[waybill] = time.time()
+        self._items[waybill] = time.monotonic()
 
     def refresh(self, waybill: str) -> None:
         """搬回一条回复后刷新等待计时：小圆对同一单连发多条也能全部搬回，
         30 秒无新回复才算这轮对话结束。"""
         if waybill in self._items:
-            self._items[waybill] = time.time()
+            self._items[waybill] = time.monotonic()
+
+    def __contains__(self, waybill: str) -> bool:
+        return waybill in self._items
 
     def peek_oldest(self) -> Optional[str]:
         """最早的等待运单号（不移除，供 FIFO 关联）。"""
@@ -154,7 +233,7 @@ class PendingQueue:
 
     def sweep(self) -> List[str]:
         """返回超时应重置的运单号并移出队列。"""
-        now = time.time()
+        now = time.monotonic()
         expired = [wb for wb, ts in self._items.items()
                    if now - ts >= self.reset_seconds]
         for wb in expired:
@@ -166,8 +245,20 @@ class PendingQueue:
 # 窗口对接层接口（真实对接时替换为 uiautomation 实现）
 # ---------------------------------------------------------------------------
 
+class RetryableSendError(RuntimeError):
+    """适配器确定消息尚未发出，可以安全地重试。"""
+
+
+class SendUncertainError(RuntimeError):
+    """发送动作已尝试，无法确认结果；必须停止并由用户核对。"""
+
+
+class _StopRequested(Exception):
+    """在下一次发送前响应停止请求。"""
+
+
 class WxSource:
-    """微信群消息来源：返回监控群里的新消息。"""
+    """返回新事件；真实适配器需先建立历史基线，不能把旧消息当新消息。"""
     def fetch_new(self) -> List[Message]:
         raise NotImplementedError
 
@@ -175,6 +266,10 @@ class WxSource:
 class WxSink:
     """微信群发送：粘贴到输入框并回车。"""
     def send(self, text: str) -> None:
+        raise NotImplementedError
+
+    def send_mention(self, staff: str, text: str) -> None:
+        """选择真实群成员提及后发送，不能仅拼接普通的 @ 文本。"""
         raise NotImplementedError
 
 
@@ -194,99 +289,164 @@ class KfSink:
 # 主循环
 # ---------------------------------------------------------------------------
 
+class _RecentIds:
+    """保留最近的事件编号，避免长期运行时去重集合无限增长。"""
+
+    def __init__(self, limit: int = 10000):
+        self.limit = limit
+        self._ids = OrderedDict()
+
+    def __contains__(self, message_id: str) -> bool:
+        return message_id in self._ids
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+    def add(self, message_id: str) -> None:
+        self._ids[message_id] = None
+        self._ids.move_to_end(message_id)
+        while len(self._ids) > self.limit:
+            self._ids.popitem(last=False)
+
+
 class Forwarder:
     def __init__(self, cfg: dict, wx_src: WxSource, wx_snk: WxSink,
                  kf_src: KfSource, kf_snk: KfSink,
                  log: Callable[[str], None] = print):
-        self.cfg = cfg
+        self.cfg = validate_config(cfg)
         self.wx_src = wx_src
         self.wx_snk = wx_snk
         self.kf_src = kf_src
         self.kf_snk = kf_snk
         self.log = log
-        self.queue = PendingQueue(cfg.get("reset_seconds", 30))
-        self._seen_wx: set[str] = set()      # 已处理的微信消息指纹
-        self._seen_kf: set[str] = set()      # 已搬运的小圆回复指纹
-        self._seen_wx_snap: set[str] = set() # 启动后第一条快照，不回溯历史
+        self.queue = PendingQueue(self.cfg["reset_seconds"])
+        self._seen_wx = _RecentIds()
+        self._seen_kf = _RecentIds()
+        # 即使来源取出即删除，整批消息也先缓存；前一条发送失败不丢后续条目。
+        # 重试缓冲未清空前不继续读取同方向，避免故障期间无限积压在内存中。
+        self._wx_buffer = OrderedDict()
+        self._kf_buffer = OrderedDict()
+        self._stop_event = None
+        self._uncertain_error = None
 
-    # -- 方向① 微信 -> 客户管家 --------------------------------------------
-    def poll_wx(self) -> None:
-        for msg in self.wx_src.fetch_new():
-            fp = msg.fingerprint
-            if fp in self._seen_wx:
-                continue
-            self._seen_wx.add(fp)
+    def _send(self, send: Callable, *args) -> None:
+        if self._uncertain_error is not None:
+            raise self._uncertain_error
+        if self._stop_event is not None and self._stop_event.is_set():
+            raise _StopRequested
+        try:
+            send(*args)
+        except RetryableSendError:
+            raise
+        except SendUncertainError as exc:
+            self._uncertain_error = exc
+            raise
+        except Exception as exc:
+            # 未分类的发送异常不能证明消息没发出，禁止盲目重发。
+            self._uncertain_error = SendUncertainError(f"无法确认发送结果：{exc}")
+            raise self._uncertain_error from exc
 
+    def _flush_wx(self) -> None:
+        while self._wx_buffer:
+            message_id, msg = next(iter(self._wx_buffer.items()))
             verdict = classify(msg, self.cfg)
-            if verdict is Verdict.IGNORE:
-                continue  # 装作没看见，不留痕
-
             if verdict is Verdict.AT_SERVICE:
-                staff = self.cfg.get("service_staff", "").strip()
+                staff = self.cfg["service_staff"]
                 if not staff:
-                    self.log(f"[警告] 命中@客服词但客服名未配置：{msg.content[:30]}…")
-                    continue
-                self.wx_snk.send(f"@{staff} {msg.content}")
-                self.log(f"[艾特客服] 已在微信群 @{staff}：{msg.content[:40]}")
-            else:  # FORWARD
-                self.kf_snk.send(msg.content)
-                wb = extract_waybill(msg.content) or msg.fingerprint[:20]
-                self.queue.add(wb)
-                self.log(f"[转发] → 客户管家 {self.cfg.get('kf_group', '')}：{msg.content[:40]}")
-
-    # -- 方向② 客户管家 -> 微信 --------------------------------------------
-    def poll_kf(self) -> None:
-        bot = self.cfg.get("bot_name", "小圆")
-        for rep in self.kf_src.fetch_replies(bot):
-            if _is_media(rep.content):
-                continue  # 图片等非文本回复：当没看见
-            fp = rep.fingerprint
-            if fp in self._seen_kf:
-                continue
-            self._seen_kf.add(fp)
-
-            # 队列为空：这条小圆回复不是我转发的消息引来的，不搬
-            if self.queue.is_empty():
-                continue
-
-            # 关联并搬回：
-            #   回复带单号且在等待队列 → 搬回并刷新计时（同单连发多条全部搬）
-            #   回复不带单号且队列非空 → 对应最早一条等待，同样刷新
-            #   回复带单号但不在队列 → 已结束的旧对话，不搬
-            wb = extract_waybill(rep.content)
-            if wb:
-                if wb not in self.queue._items:
-                    continue
-                self.queue.refresh(wb)
+                    raise ValueError("命中 @客服词句，但客服完整名称未配置；消息保留待处理")
+                self._send(self.wx_snk.send_mention, staff, msg.content)
+                notice = f"[艾特客服] 已在微信群 @{staff}：{msg.content[:40]}"
+            elif verdict is Verdict.FORWARD:
+                self._send(self.kf_snk.send, msg.content)
+                self.queue.add(extract_waybill(msg.content))
+                notice = f"[转发] → 客户管家 {self.cfg['kf_group']}：{msg.content[:40]}"
             else:
-                oldest = self.queue.peek_oldest()
-                if oldest is None:
-                    continue
-                self.queue.refresh(oldest)
+                notice = None
+            # 只在发送明确成功或规则明确忽略后确认事件。
+            self._seen_wx.add(message_id)
+            del self._wx_buffer[message_id]
+            if notice:
+                self.log(notice)
 
-            self.wx_snk.send(rep.content)
-            self.log(f"[搬回] ← {rep.sender}：{rep.content[:40]}")
+    def poll_wx(self) -> None:
+        """先完成待重试批次，再读取新事件，保持原消息次序。"""
+        self.sweep_timeout()
+        self._flush_wx()
+        for msg in self.wx_src.fetch_new():
+            if msg.message_id not in self._seen_wx:
+                self._wx_buffer.setdefault(msg.message_id, msg)
+        self._flush_wx()
 
-    # -- 超时重置 -----------------------------------------------------------
+    def _flush_kf(self) -> None:
+        while self._kf_buffer:
+            message_id, (reply, waybill) = next(iter(self._kf_buffer.items()))
+            self._send(self.wx_snk.send, reply.content)
+            self.queue.refresh(waybill)
+            self._seen_kf.add(message_id)
+            del self._kf_buffer[message_id]
+            self.log(f"[搬回] ← {reply.sender}：{reply.content[:40]}")
+
+    def poll_kf(self) -> None:
+        """先清超时，再关联本批回复；已及时收到的回复发送失败后仍可重试。"""
+        self.sweep_timeout()
+        self._flush_kf()
+        bot = self.cfg["bot_name"]
+        replies = self.kf_src.fetch_replies(bot)
+        # 读取窗口可能耗时，关联前再次排除在读取过程中已到期的等待。
+        self.sweep_timeout()
+        for reply in replies:
+            message_id = reply.message_id
+            if message_id in self._seen_kf or message_id in self._kf_buffer:
+                continue
+            if (reply.is_self or reply.kind != "text" or _is_media(reply.content)
+                    or reply.sender.strip() != bot):
+                self._seen_kf.add(message_id)
+                continue
+            # 无单号只能使用最早等待规则；不能证明与其他人的机器人请求无关。
+            waybill = extract_waybill(reply.content) or self.queue.peek_oldest()
+            if waybill is None or waybill not in self.queue:
+                self._seen_kf.add(message_id)
+                continue
+            self._kf_buffer[message_id] = (reply, waybill)
+        self._flush_kf()
+
     def sweep_timeout(self) -> None:
-        for wb in self.queue.sweep():
-            self.log(f"[结束] {wb} 已 {self.cfg.get('reset_seconds', 30)} 秒无小圆新回复，"
-                     f"本轮等待结束；后续回复不再搬运，如需结果请到客户管家查看")
+        for waybill in self.queue.sweep():
+            self.log(f"[结束] {waybill} 已 {self.cfg['reset_seconds']:g} 秒无小圆新回复，"
+                     "本轮等待结束；后续回复不再搬运，如需结果请到客户管家查看")
 
     def poll_once(self) -> None:
-        self.poll_wx()
+        if self._uncertain_error is not None:
+            raise self._uncertain_error
+        # 先消费已经存在的客户管家回复，避免把它们归入本轮刚转发的新请求。
         self.poll_kf()
-        self.sweep_timeout()
+        self.poll_wx()
 
-    def run(self) -> None:
-        interval = max(1, int(self.cfg.get("poll_interval", 3)))
-        self.log(f"开始运行：微信[{self.cfg.get('wx_group', '')}] ⇄ 客户管家[{self.cfg.get('kf_group', '')}]，每 {interval} 秒轮询")
-        while True:
-            try:
-                self.poll_once()
-            except Exception as e:  # 单轮异常不中断整体运行
-                self.log(f"[异常] {e!r}")
-            time.sleep(interval)
+    def run(self, stop_event=None) -> None:
+        """响应停止事件；发送结果不确定时向外抛错，由界面提示人工核对。"""
+        event = stop_event if stop_event is not None else threading.Event()
+        self._stop_event = event
+        interval = self.cfg["poll_interval"]
+        self.log(f"开始运行：微信[{self.cfg['wx_group']}] ⇄ 客户管家[{self.cfg['kf_group']}]，每 {interval:g} 秒轮询")
+        try:
+            while not event.is_set():
+                try:
+                    self.poll_once()
+                except _StopRequested:
+                    break
+                except SendUncertainError as exc:
+                    event.set()
+                    self.log(f"[已停止] {exc}；请核对目标群中的发送结果后重新启动")
+                    raise
+                except RetryableSendError as exc:
+                    self.log(f"[待重试] {exc}；已保留未发送消息")
+                except Exception as exc:
+                    self.log(f"[异常] {exc!r}")
+                if event.wait(interval):
+                    break
+        finally:
+            self._stop_event = None
+            self.log("搬运已停止")
 
 
 # ---------------------------------------------------------------------------
@@ -304,14 +464,13 @@ class MockWxSource(WxSource):
 
 
 class MockKfSource(KfSource):
-    """内存演示：只放出机器人（小圆）的新回复，人工消息留在箱里不搬。"""
+    """内存演示：只放出名称完全匹配机器人的新事件。"""
     def __init__(self):
         self.inbox: List[Message] = []
 
     def fetch_replies(self, bot_name: str) -> List[Message]:
-        out = [m for m in self.inbox if bot_name in m.sender]
-        self.inbox = [m for m in self.inbox if bot_name not in m.sender]
-        return out
+        messages, self.inbox = self.inbox, []
+        return [message for message in messages if message.sender.strip() == bot_name]
 
 
 class MockWxSink(WxSink):
@@ -320,6 +479,10 @@ class MockWxSink(WxSink):
 
     def send(self, text: str) -> None:
         self.store.append(text)
+
+    def send_mention(self, staff: str, text: str) -> None:
+        # 内存演示只记录可读文本，真实适配器需要选择群成员完成提及。
+        self.store.append(f"@{staff} {text}")
 
 
 class MockKfSink(KfSink):
@@ -339,6 +502,7 @@ def mock_demo() -> None:
         "block_keywords": ["退回", "拦截"],
         "at_keywords": ["投诉", "赔偿"],
         "service_staff": "张士祥",
+        "bot_name": "小圆-总公司",
         "reset_seconds": 30,
     })
 
