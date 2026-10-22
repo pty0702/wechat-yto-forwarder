@@ -1,0 +1,5 @@
+# 备份文件
+python版/_backup_machine_path_*.txt
+# Python
+__pycache__/
+*.pyc
