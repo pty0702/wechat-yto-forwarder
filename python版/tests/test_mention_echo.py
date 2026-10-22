@@ -39,6 +39,102 @@ class EmbeddedMentionAdapter(adapter.WindowsChatAdapter):
         return draft, "@" + staff + " " + text
 
 
+class FakeClock:
+    """通过推进虚拟时间验证轮询边界，不让测试等待真实秒数。"""
+
+    def __init__(self):
+        self.now = 0.0
+        self.waits = []
+        self.on_sleep = None
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, duration):
+        self.waits.append(duration)
+        self.now += duration
+        if self.on_sleep:
+            self.on_sleep()
+
+
+class DraftReadbackTests(unittest.TestCase):
+    def setUp(self):
+        self.auto = FakeAuto(value_pattern=False)
+        self.client = adapter.WindowsChatAdapter(self.auto, profile(), "目标群", "客户管家", lambda line: None)
+        self.text = "示例完整正文"
+        self.reported = "示例"
+        self.clock = FakeClock()
+        pattern = self.auto.edit.patterns[self.auto.PatternId.TextPattern]
+        pattern.GetText = self.read_draft
+
+    def read_draft(self, length):
+        if self.auto.draft and not self.auto.sent:
+            if isinstance(self.reported, Exception):
+                raise self.reported
+            return self.reported
+        return self.auto.draft
+
+    def send(self):
+        with patch.object(adapter.time, "monotonic", side_effect=self.clock.monotonic), \
+                patch.object(adapter.time, "sleep", side_effect=self.clock.sleep):
+            self.client.send(self.text)
+
+    def assert_preserved_without_submit(self):
+        self.assertEqual(self.auto.sent, [])
+        self.assertEqual(self.auto.draft, self.text)
+        self.assertEqual(self.auto.set_values, [])
+        self.assertEqual(self.auto.keys, [self.text])
+
+    def test_partial_readback_then_exact_sends_once_without_retyping(self):
+        def refresh():
+            if len(self.clock.waits) == 2:
+                self.reported = self.text
+
+        self.clock.on_sleep = refresh
+        self.send()
+        self.assertEqual(self.clock.waits, [0.05, 0.05])
+        self.assertEqual(self.auto.keys, [self.text, "{Enter}"])
+        self.assertEqual(self.auto.sent, [self.text])
+        self.assertEqual(self.auto.draft, "")
+
+    def test_persistent_mismatch_times_out_at_two_seconds_and_preserves_draft(self):
+        with self.assertRaisesRegex(adapter.AdapterConfigurationError, "输入结果与原文不同"):
+            self.send()
+        self.assertAlmostEqual(self.clock.now, 2.0)
+        self.assertLessEqual(max(self.clock.waits), 0.05)
+        self.assert_preserved_without_submit()
+
+    def test_group_change_during_readback_wait_stops_without_submit(self):
+        self.clock.on_sleep = lambda: setattr(self.auto.title, "Name", "另一群")
+        with self.assertRaisesRegex(adapter.AdapterConfigurationError, "当前会话不是配置的群"):
+            self.send()
+        self.assertEqual(self.clock.waits, [0.05])
+        self.assert_preserved_without_submit()
+
+    def test_focus_loss_during_readback_wait_stops_without_submit(self):
+        self.clock.on_sleep = lambda: setattr(self.auto, "focused", None)
+        with self.assertRaisesRegex(adapter.AdapterConfigurationError, "焦点已变化"):
+            self.send()
+        self.assertEqual(self.clock.waits, [0.05])
+        self.assert_preserved_without_submit()
+
+    def test_embedded_placeholder_error_stops_immediately_without_waiting(self):
+        self.reported = "\ufffc"
+        with self.assertRaisesRegex(adapter.AdapterConfigurationError, "嵌入对象占位符"):
+            self.send()
+        self.assertEqual(self.clock.waits, [])
+        self.assert_preserved_without_submit()
+
+    def test_read_error_during_wait_is_not_treated_as_temporary_mismatch(self):
+        failure = RuntimeError("模拟输入控件读取失败")
+        self.clock.on_sleep = lambda: setattr(self, "reported", failure)
+        with self.assertRaisesRegex(adapter.AdapterConfigurationError, "模拟输入控件读取失败") as raised:
+            self.send()
+        self.assertIs(raised.exception.__cause__, failure)
+        self.assertEqual(self.clock.waits, [0.05])
+        self.assert_preserved_without_submit()
+
+
 class MentionEchoTests(unittest.TestCase):
     def setUp(self):
         self.auto = MentionEchoAuto()

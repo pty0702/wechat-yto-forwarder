@@ -253,7 +253,28 @@ class Wechat4Adapter(WindowsChatAdapter):
         if self._mention_popovers():
             raise AdapterConfigurationError("微信已有用户打开的 @ 弹层，已拒绝操作")
         prefix = "@" + staff
-        self._type(edit, prefix)
+        # 微信 4 不一定用 Unicode 注入的 @ 唤起候选，先发送物理 Shift+2。
+        self._check_focus(edit)
+        self._foreground_is_ours()
+        edit = self._mention_input(edit_id)
+        if self._value(edit):
+            raise RetryableSendError("输入物理 @ 前出现新草稿，已保留草稿并停止")
+        self.auto.SendKeys("{Shift}2", charMode=False, waitTime=0.1)
+        self._bind()
+        edit = self._mention_input(edit_id)
+        if self._value(edit) != "@":
+            raise AdapterConfigurationError("物理 @ 输入结果不是单个 @，已保留草稿并停止")
+        popovers = self._wait_for(self._mention_popovers, bool)
+        if len(popovers) != 1 or getattr(popovers[0], "ProcessId", None) != self._expected_pid:
+            raise AdapterConfigurationError("物理 @ 后未找到唯一同进程微信原生弹层，已保留草稿")
+        self._bind()
+        edit = self._mention_input(edit_id)
+        self._check_focus(edit)
+        self._foreground_is_ours()
+        if self._value(edit) != "@":
+            raise AdapterConfigurationError("输入客服昵称前 @ 草稿发生变化，已保留草稿并停止")
+        # 只有原生弹层确实出现后才输入昵称，不能把普通 @ 文本当成真实提醒。
+        self._type(edit, staff)
         popovers = self._wait_for(self._mention_popovers, bool)
         if len(popovers) != 1:
             raise AdapterConfigurationError("输入昵称后未找到唯一微信原生 @ 弹层")

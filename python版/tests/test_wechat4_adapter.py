@@ -808,9 +808,13 @@ class Wechat4MentionTests(unittest.TestCase):
         self.token_text = None
         self.text_override = None
         self.keep_popover = False
+        self.trigger_draft = "@"
+        self.trigger_popovers = [self.popover]
+        self.after_trigger = None
         self.after_type = None
         self.after_click = None
         self.typed = []
+        self.events = []
         self.text_range = SimpleNamespace(GetText=lambda length: (
             self.auto.draft if self.text_override is None else self.text_override
         ))
@@ -833,17 +837,33 @@ class Wechat4MentionTests(unittest.TestCase):
 
     def type_text(self, edit, text):
         self.assertIs(edit, self.auto.edit)
+        if text == self.staff:
+            self.assertEqual(self.auto.draft, "@")
+            self.assertEqual([node for node in self.auto.window.children
+                              if node.AutomationId == "MentionPopover"], [self.popover],
+                             "只有物理 @ 已打开唯一弹层后才能输入昵称")
+        self.events.append(("type", text))
         self.typed.append(text)
         self.auto.draft += text.replace("\r\n", "\n").replace("\r", "\n")
-        if text == "@" + self.staff:
-            self.auto.window.children.append(self.popover)
+        if text == self.staff:
             if self.after_type:
                 self.after_type()
 
     def compose(self):
         def send_keys(keys, **kwargs):
             self.auto.keys.append(keys)
-            self.assertEqual(keys, "{Ctrl}{End}", "构造真实 @ 时不得按发送键")
+            if keys == "{Shift}2":
+                self.assertIs(kwargs.get("charMode"), False)
+                self.assertEqual(self.auto.draft, "")
+                self.assertIs(self.auto.focused, self.auto.edit)
+                self.assertIs(self.auto.foreground, self.auto.window)
+                self.events.append(("physical_at", keys))
+                self.auto.draft = self.trigger_draft
+                self.auto.window.children.extend(self.trigger_popovers)
+                if self.after_trigger:
+                    self.after_trigger()
+            else:
+                self.assertEqual(keys, "{Ctrl}{End}", "构造真实 @ 时不得按发送键")
 
         with patch.object(self.client, "_type", side_effect=self.type_text), \
                 patch.object(self.client, "_focus", side_effect=lambda edit: self.auto.focus()), \
@@ -853,7 +873,7 @@ class Wechat4MentionTests(unittest.TestCase):
     def assert_no_candidate_click(self):
         self.assertTrue(all(not candidate.clicks for candidate in self.candidates))
         self.assertEqual(self.auto.sent, [])
-        self.assertEqual(self.auto.keys, [])
+        self.assertIn(self.auto.keys, ([], ["{Shift}2"]))
 
     def mutate_after_selection(self, mutate):
         original = self.client._mention_selection
@@ -873,9 +893,10 @@ class Wechat4MentionTests(unittest.TestCase):
         result = self.compose()
         self.assertEqual(result, ("\ufffc " + self.body, "@" + self.staff + " " + self.body))
         self.assertEqual(self.auto.draft, result[0])
-        self.assertEqual(self.typed, ["@" + self.staff, " " + self.body])
+        self.assertEqual(self.typed, [self.staff, " " + self.body])
+        self.assertEqual(self.events[:2], [("physical_at", "{Shift}2"), ("type", self.staff)])
         self.assertEqual(len(self.candidates[0].clicks), 1)
-        self.assertEqual(self.auto.keys, ["{Ctrl}{End}"])
+        self.assertEqual(self.auto.keys, ["{Shift}2", "{Ctrl}{End}"])
         self.assertEqual(self.auto.sent, [])
 
     def test_near_name_cannot_replace_exact_nickname(self):
@@ -955,15 +976,15 @@ class Wechat4MentionTests(unittest.TestCase):
                 with self.assertRaises(AdapterConfigurationError):
                     self.compose()
                 self.assertEqual(len(self.candidates[0].clicks), 1)
-                self.assertEqual(self.typed, ["@" + self.staff])
-                self.assertEqual(self.auto.keys, [])
+                self.assertEqual(self.typed, [self.staff])
+                self.assertEqual(self.auto.keys, ["{Shift}2"])
                 self.assertEqual(self.auto.sent, [])
 
     def test_missing_text_pattern_cannot_confirm_real_mention(self):
         self.auto.edit.patterns.pop(FakeAuto.PatternId.TextPattern)
         with self.assertRaises(AdapterConfigurationError):
             self.compose()
-        self.assertEqual(self.typed, ["@" + self.staff])
+        self.assertEqual(self.typed, [self.staff])
         self.assertEqual(self.auto.sent, [])
 
     def test_remaining_popover_after_click_prevents_body_and_submit(self):
@@ -971,8 +992,8 @@ class Wechat4MentionTests(unittest.TestCase):
         with self.assertRaises(AdapterConfigurationError):
             self.compose()
         self.assertEqual(len(self.candidates[0].clicks), 1)
-        self.assertEqual(self.typed, ["@" + self.staff])
-        self.assertEqual(self.auto.keys, [])
+        self.assertEqual(self.typed, [self.staff])
+        self.assertEqual(self.auto.keys, ["{Shift}2"])
 
     def test_offscreen_or_clipped_candidate_is_not_clicked(self):
         for state in ("offscreen", "clipped"):
@@ -1005,12 +1026,12 @@ class Wechat4MentionTests(unittest.TestCase):
                 with self.assertRaises(AdapterConfigurationError):
                     self.compose()
                 self.assertEqual(self.auto.sent, [])
-                self.assertEqual(self.auto.keys, [])
+                self.assertEqual(self.auto.keys, [] if phase == "entry" else ["{Shift}2"])
                 if phase == "entry":
                     self.assert_no_candidate_click()
                     self.assertEqual(self.typed, [])
                 else:
-                    self.assertEqual(self.typed, ["@" + self.staff])
+                    self.assertEqual(self.typed, [self.staff])
 
     def test_input_wrong_pid_is_rejected_at_entry_and_after_click(self):
         for phase in ("entry", "after_click"):
@@ -1023,7 +1044,7 @@ class Wechat4MentionTests(unittest.TestCase):
                 with self.assertRaises(AdapterConfigurationError):
                     self.compose()
                 self.assertEqual(self.auto.sent, [])
-                self.assertEqual(self.auto.keys, [])
+                self.assertEqual(self.auto.keys, [] if phase == "entry" else ["{Shift}2"])
                 self.assertNotIn(" " + self.body, self.typed)
 
     def test_crlf_body_returns_normalized_draft_and_echo(self):
@@ -1033,6 +1054,50 @@ class Wechat4MentionTests(unittest.TestCase):
         self.assertEqual(result, ("\ufffc " + normalized, "@" + self.staff + " " + normalized))
         self.assertEqual(self.auto.draft, result[0])
         self.assertEqual(self.auto.sent, [])
+
+    def test_physical_at_wrong_draft_stops_before_typing_nickname(self):
+        for draft in ("", "2", "＠", "@用户草稿"):
+            with self.subTest(draft=draft):
+                self.reset()
+                self.trigger_draft = draft
+                with self.assertRaises((AdapterConfigurationError, RetryableSendError)):
+                    self.compose()
+                self.assertEqual(self.auto.draft, draft)
+                self.assertEqual(self.typed, [])
+                self.assert_no_candidate_click()
+
+    def test_physical_at_requires_unique_same_pid_popover_before_nickname(self):
+        for state in ("missing", "duplicate", "wrong_pid"):
+            with self.subTest(state=state):
+                self.reset()
+                if state == "missing":
+                    self.trigger_popovers = []
+                elif state == "duplicate":
+                    self.trigger_popovers.append(Node(aid="MentionPopover", kind="WindowControl",
+                                                      cls="mmui::XPopover"))
+                else:
+                    self.popover.ProcessId = 99
+                with self.assertRaises(AdapterConfigurationError):
+                    self.compose()
+                self.assertEqual(self.auto.draft, "@")
+                self.assertEqual(self.typed, [])
+                self.assert_no_candidate_click()
+
+    def test_focus_group_or_foreground_change_after_physical_at_stops_nickname(self):
+        for state in ("focus", "group", "foreground"):
+            with self.subTest(state=state):
+                self.reset()
+                if state == "focus":
+                    self.after_trigger = lambda: setattr(self.auto, "focused", None)
+                elif state == "group":
+                    self.after_trigger = lambda: setattr(self.auto.title, "Name", "另一个群")
+                else:
+                    self.after_trigger = lambda: setattr(self.auto, "foreground", Node(kind="WindowControl"))
+                with self.assertRaises((AdapterConfigurationError, RetryableSendError)):
+                    self.compose()
+                self.assertEqual(self.auto.draft, "@")
+                self.assertEqual(self.typed, [])
+                self.assert_no_candidate_click()
 
 
 if __name__ == "__main__":

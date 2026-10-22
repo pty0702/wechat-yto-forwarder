@@ -365,8 +365,19 @@ class WindowsChatAdapter:
                     pattern.SetValue(text)
                 else:
                     self._type(edit, text)
-            if self._value(edit) != expected:
-                raise AdapterConfigurationError("输入结果与原文不同，已保留草稿，未提交发送")
+            draft = self._value(edit)
+            if draft != expected:
+                # UIA 可能稍晚才暴露完整输入；只等待回读，不补字、覆盖或清理草稿。
+                draft_deadline = time.monotonic() + 2
+                while draft != expected:
+                    self._check_focus(edit)
+                    remaining = draft_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise AdapterConfigurationError("输入结果与原文不同，已保留草稿，未提交发送")
+                    time.sleep(min(0.05, remaining))
+                    self._check_focus(edit)
+                    # 占位符、失效控件等读取异常立即向外传播，不能作为暂时不匹配忽略。
+                    draft = self._value(edit)
             self._check_focus(edit)
             # 自此即使按键 API 抛异常，也不能证明消息未发出。
             attempted = True
