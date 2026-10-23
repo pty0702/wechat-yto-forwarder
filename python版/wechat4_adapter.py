@@ -90,13 +90,27 @@ class Wechat4Adapter(WindowsChatAdapter):
             raise AdapterConfigurationError(
                 f"微信多选适配器当前实例已停用，请人工核对界面并重新创建会话：{self._unusable_reason}"
             )
-        # 只匹配桌面直接子窗，不能为定位微信遍历其他进程的控件树。
-        roots = self.auto.GetRootControl().GetChildren()
-        candidates = [node for node in roots
-                      if (self._expected_pid is None or getattr(node, "ProcessId", None) == self._expected_pid)
-                      and matches(node, self.profile["window"])]
+
+        def collect():
+            # 只匹配桌面直接子窗，不能为定位微信遍历其他进程的控件树。
+            roots = self.auto.GetRootControl().GetChildren()
+            return [node for node in roots
+                    if (self._expected_pid is None or getattr(node, "ProcessId", None) == self._expected_pid)
+                    and matches(node, self.profile["window"])]
+
+        candidates = collect()
         if len(candidates) != 1:
-            raise AdapterConfigurationError("微信 4 初始进程窗口未唯一匹配，进程可能已变化；请重新启动会话")
+            # 无障碍激活切换 Qt/mmui 窗口暴露时，新旧节点可能短暂并存或缺失；
+            # 只做有限等待，不放宽名称或进程匹配条件，也不把歧义当唯一。
+            deadline = time.monotonic() + 1.0
+            while len(candidates) != 1 and time.monotonic() < deadline:
+                time.sleep(0.1)
+                candidates = collect()
+        if len(candidates) != 1:
+            raise AdapterConfigurationError(
+                f"微信 4 初始进程窗口未唯一匹配（候选 {len(candidates)} 个），"
+                "进程可能已变化或界面正在切换；请重新启动会话"
+            )
         window = candidates[0]
         pid = getattr(window, "ProcessId", None)
         if type(pid) is not int or pid <= 0:

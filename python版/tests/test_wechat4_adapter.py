@@ -375,6 +375,32 @@ class Wechat4AdapterTests(unittest.TestCase):
                     self.client._bind()
                 self.assert_no_clicks()
 
+    def test_window_gap_during_accessibility_switch_binds_after_wait(self):
+        # 无障碍切换 Qt/mmui 暴露时顶层窗可能短暂缺失，有限等待后仍可唯一绑定。
+        original = self.auto.root.GetChildren
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            return [] if len(calls) == 1 else original()
+
+        self.auto.root.GetChildren = flaky
+        with patch("wechat4_adapter.time.monotonic", side_effect=[0, 0.2]), \
+                patch("wechat4_adapter.time.sleep") as sleep:
+            window = self.client._bind()
+        self.assertIs(window, self.auto.window)
+        self.assertEqual(sleep.call_count, 1)
+        self.assert_no_clicks()
+
+    def test_stable_duplicate_windows_report_candidate_count(self):
+        twin = Node(aid="window", kind="WindowControl", cls="mmui::MainWindow")
+        self.auto.root.children.append(twin)
+        with patch("wechat4_adapter.time.monotonic", side_effect=[0, 0.2, 2]), \
+                patch("wechat4_adapter.time.sleep"):
+            with self.assertRaisesRegex(AdapterConfigurationError, "候选 2 个"):
+                self.client._bind()
+        self.assert_no_clicks()
+
     def test_foreground_wrapper_with_same_main_identity_is_accepted(self):
         wrapper = Node(kind="WindowControl", rid=self.auto.window.runtime_id)
         wrapper.NativeWindowHandle = self.auto.window.NativeWindowHandle
