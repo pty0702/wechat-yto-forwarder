@@ -6,7 +6,7 @@
     "group_title": {"type": "TextControl", "name": "{group}", "depth": 30},
     "messages": {"automation_id": "chat_message_list", "depth": 30},
     "message_item": {"class_name": "mmui::ChatTextItemView", "depth": 1},
-    "parser": "wechat4",
+    "parser": "wechat_db",
     "context_points": [[0.25, 0.6], [0.75, 0.6]],
     "menu_depth": 8,
     "input": {"automation_id": "chat_input_field", "depth": 30},

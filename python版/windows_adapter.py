@@ -217,17 +217,25 @@ def load_profile(path):
         item = profile.get(side)
         if not isinstance(item, dict):
             raise AdapterConfigurationError(f"适配配置缺少 {side} 对象")
-        for key in ("window", "group_title", "messages", "message_item", "input", "self_names"):
-            if not item.get(key):
-                raise AdapterConfigurationError(f"{side} 缺少 {key} 配置")
+        parser = item.get("parser", "selectors")
+        if parser not in {"selectors", "yto", "wechat4", "wechat_db"}:
+            raise AdapterConfigurationError(f"{side} 消息解析器不受支持")
+        if parser == "wechat4" and side != "wx":
+            raise AdapterConfigurationError("wechat4 解析器只能用于微信端")
+        if parser == "wechat_db" and side != "wx":
+            raise AdapterConfigurationError("wechat_db 解析器只能用于微信端")
+        if parser == "wechat_db":
+            # 数据库通道不读 UIA 树，只需本账号身份用于排除本人消息。
+            if not item.get("self_names"):
+                raise AdapterConfigurationError(f"{side} 缺少 self_names 配置")
+        else:
+            for key in ("window", "group_title", "messages", "message_item", "input", "self_names"):
+                if not item.get(key):
+                    raise AdapterConfigurationError(f"{side} 缺少 {key} 配置")
         if not isinstance(item["self_names"], list) or not all(isinstance(s, str) and s.strip() for s in item["self_names"]):
             raise AdapterConfigurationError(f"{side}.self_names 必须填写本账号的完整群昵称列表")
         if item.get("parser", "selectors") == "selectors" and not item.get("sender"):
             raise AdapterConfigurationError(f"{side} 缺少 sender 选择器")
-        if item.get("parser", "selectors") not in {"selectors", "yto", "wechat4"}:
-            raise AdapterConfigurationError(f"{side} 消息解析器不受支持")
-        if item.get("parser") == "wechat4" and side != "wx":
-            raise AdapterConfigurationError("wechat4 解析器只能用于微信端")
         mention_mode = item.get("mention_mode")
         if mention_mode is not None and (mention_mode != "wechat4" or side != "wx"
                                          or item.get("parser") != "wechat4"):
@@ -510,6 +518,15 @@ def create_live_adapters(cfg, log=print):
     if not isinstance(cfg.get("wechat_accessibility", False), bool):
         raise AdapterConfigurationError("微信兼容开关必须为布尔值")
     with auto.UIAutomationInitializerInThread(), ExitStack() as contexts:
+        if profile["wx"].get("parser") == "wechat_db":
+            # 读走微信本地库、发走坐标/OCR：不绑定 UIA 窗口，也不需要无障碍兼容。
+            from wechat_db_adapter import WechatDbAdapter
+            wx = WechatDbAdapter(profile["wx"], cfg["wx_group"], log)
+            kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
+            wx.prepare()
+            kf.prepare()
+            yield wx, wx, kf, kf
+            return
         wx_window = select(auto.GetRootControl(), profile["wx"]["window"], "微信窗口")
         pid = wx_window.ProcessId
         if cfg.get("wechat_accessibility", False):
