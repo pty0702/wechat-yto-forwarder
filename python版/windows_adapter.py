@@ -89,6 +89,17 @@ def select(root, path, label="控件"):
     return node
 
 
+def select_retry(root, path, label="控件", attempts=11):
+    """兼容开启后控件树可能稍晚才就绪；只重试匹配，不放宽选择器。"""
+    for attempt in range(attempts):
+        try:
+            return select(root, path, label)
+        except AdapterConfigurationError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05)
+
+
 def _format(value, **values):
     if isinstance(value, str):
         for key, replacement in values.items():
@@ -259,7 +270,7 @@ class WindowsChatAdapter:
             if process is None or process.exeName.lower() != self.profile["process_name"].lower():
                 raise AdapterConfigurationError("窗口所属进程与适配配置不符")
             self._process_id = self.window.ProcessId
-        title = select(self.window, self.profile["group_title"], "当前会话标题")
+        title = select_retry(self.window, self.profile["group_title"], "当前会话标题")
         if str(title.Name or "").strip() != self.group:
             raise RetryableSendError(f"{self.namespace}当前会话不是配置的群，请手动打开目标群：{self.group}")
         return self.window
@@ -276,7 +287,7 @@ class WindowsChatAdapter:
 
     def prepare(self):
         window = self._bind()
-        edit = select(window, self.profile["input"], "聊天输入框")
+        edit = select_retry(window, self.profile["input"], "聊天输入框")
         self._value(edit)
         self.tracker.update(self._rows())
         self.log(f"[适配] {self.namespace} 已核对目标群并建立历史快照")
@@ -503,6 +514,8 @@ def create_live_adapters(cfg, log=print):
         pid = wx_window.ProcessId
         if cfg.get("wechat_accessibility", False):
             contexts.enter_context(_wechat_session(pid, log))
+            # 等 UIA 树暴露 mmui 控件，避免刚开启就取标题/输入框落空。
+            time.sleep(0.5)
         wx_class = WindowsChatAdapter
         if profile["wx"].get("parser") == "wechat4":
             from wechat4_adapter import Wechat4Adapter

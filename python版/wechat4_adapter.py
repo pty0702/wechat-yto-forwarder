@@ -15,7 +15,10 @@ import time
 
 from wechat_forwarder import Message, RetryableSendError
 from wechat_multiselect import SenderMappingError, WxRow, sender_mapping
-from windows_adapter import AdapterConfigurationError, WindowsChatAdapter, _normalized, find_all, matches, select
+from windows_adapter import (
+    AdapterConfigurationError, WindowsChatAdapter, _normalized,
+    find_all, matches, select, select_retry,
+)
 
 
 class Wechat4RecoveryError(AdapterConfigurationError):
@@ -129,7 +132,7 @@ class Wechat4Adapter(WindowsChatAdapter):
             self.clear_sender_cache()
             raise AdapterConfigurationError("已绑定微信主窗口的 RuntimeId 或 NativeWindowHandle 发生变化，请重新创建会话")
         self.window = window
-        title = select(window, self.profile["group_title"], "当前会话标题")
+        title = select_retry(window, self.profile["group_title"], "当前会话标题")
         if str(title.Name or "").strip() != self.group:
             self.clear_sender_cache()
             raise RetryableSendError("微信当前会话不是配置的目标群，已拒绝操作")
