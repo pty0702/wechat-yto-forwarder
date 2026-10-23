@@ -11,14 +11,20 @@ from collections import OrderedDict
 import hashlib
 import json
 import math
+import sys
 import time
+from pathlib import Path
 
-from wechat_forwarder import Message, RetryableSendError
+from wechat_forwarder import Message, RetryableSendError, SendUncertainError
 from wechat_multiselect import SenderMappingError, WxRow, sender_mapping
 from windows_adapter import (
-    AdapterConfigurationError, WindowsChatAdapter, _normalized,
+    AdapterConfigurationError, ECHO_TIMEOUT_SECONDS, WindowsChatAdapter, _normalized,
     find_all, matches, select, select_retry,
 )
+
+_VENDOR = Path(__file__).resolve().parent / "vendor"
+if str(_VENDOR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR))
 
 
 class Wechat4RecoveryError(AdapterConfigurationError):
@@ -71,6 +77,7 @@ class Wechat4Adapter(WindowsChatAdapter):
         self._operation_menu_identity = None
         self._menu_identity_captured = False
         self._menu_roots = {}
+        self._gui = None
 
     def clear_sender_cache(self):
         """清除可能跨会话或控件重建失效的发送者信息。"""
@@ -78,12 +85,93 @@ class Wechat4Adapter(WindowsChatAdapter):
         self._container_id = None
         self._previous_rows = None
 
+    def _wechat_gui(self):
+        """惰性创建坐标/OCR 发送器；测试可替换本方法。"""
+        if self._gui is None:
+            from wechatauto.guia import WeChatGUI
+            self._gui = WeChatGUI()
+        return self._gui
+
+    @staticmethod
+    def _echo_match(content, text, staff):
+        body = _normalized(text)
+        got = _normalized(content)
+        if not staff:
+            return got == body
+        # 已核对微信 4.1.15.56：原生 @ 回显在昵称后为 U+2005 + 空格；
+        # 坐标/OCR 发送路径可能落下普通空格，两种都视为同一可读回显。
+        return got in (
+            staff + "\u2005 " + body,
+            staff + " " + body,
+            "@" + staff + "\u2005 " + body,
+            "@" + staff + " " + body,
+        )
+
     def _send(self, text, staff=None):
-        # 发送前快照与发送回显均重新观察身份，不能用旧缓存确认本人回显。
+        # 发送动作委托 WeChatGUI（坐标/OCR），回显确认仍走 UIA 多选身份。
+        if not isinstance(text, str) or not text:
+            raise AdapterConfigurationError("发送文本不能为空")
         previous = self._fresh_mapping
         self._fresh_mapping = True
         try:
-            return super()._send(text, staff=staff)
+            self._bind()
+            edit = select_retry(self.window, self.profile["input"], "聊天输入框")
+            if self._value(edit):
+                raise RetryableSendError("目标输入框已有草稿，请先处理草稿；程序不会覆盖")
+            before_rows = self._rows()
+            if not before_rows:
+                raise AdapterConfigurationError("当前消息列表为空，缺少可验证发送回显的历史锚点")
+            before = {msg.message_id for msg in before_rows}
+            anchor = before_rows[-1].message_id
+            gui = self._wechat_gui()
+            try:
+                try:
+                    if staff:
+                        response = gui.at_member(staff, text, who=self.group, verify=False)
+                    else:
+                        response = gui.send_msg(text, who=self.group, verify=False)
+                except Exception as exc:
+                    raise SendUncertainError(f"发送结果不确定，请人工核对：{exc}") from exc
+                if not getattr(response, "is_success", False):
+                    raise SendUncertainError(f"发送结果不确定，请人工核对：{response}")
+                deadline = time.monotonic() + ECHO_TIMEOUT_SECONDS
+                last_scan = {"rows": 0, "anchor": False, "self_new": 0, "body_match": 0}
+                while time.monotonic() < deadline:
+                    if self._value(edit):
+                        time.sleep(0.15)
+                        continue
+                    after = self._rows()
+                    anchors = [i for i, row in enumerate(after) if row.message_id == anchor]
+                    scan = {"rows": len(after), "anchor": len(anchors) == 1, "self_new": 0, "body_match": 0}
+                    if scan["anchor"]:
+                        for row in after[anchors[0] + 1:]:
+                            if row.message_id in before:
+                                continue
+                            if row.is_self:
+                                scan["self_new"] += 1
+                            if self._echo_match(row.content, text, staff):
+                                scan["body_match"] += 1
+                                if row.is_self:
+                                    return
+                    last_scan = scan
+                    time.sleep(0.15)
+                if not last_scan["anchor"]:
+                    reason = "发送前尾锚点在发送后未命中，可能列表重建"
+                elif not last_scan["self_new"]:
+                    reason = "锚点后没有识别为本人的新消息"
+                elif not last_scan["body_match"]:
+                    reason = "本人新消息与预期回显正文不一致"
+                else:
+                    reason = "回显未同时满足本人身份与完整正文"
+                raise SendUncertainError(
+                    f"发送后未找到本账号的完整消息回显（{reason}；"
+                    f"新消息 {last_scan['rows']} 条，本人新消息 {last_scan['self_new']} 条，"
+                    f"正文一致 {last_scan['body_match']} 条），请人工核对；已停止，避免重复发送"
+                )
+            except SendUncertainError:
+                raise
+            except Exception as exc:
+                raise SendUncertainError(f"发送结果不确定，请人工核对：{exc}") from exc
         finally:
             self._fresh_mapping = previous
 

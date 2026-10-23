@@ -262,11 +262,38 @@ class FakeAuto:
             raise AssertionError(f"测试未声明的键盘动作：{keys}")
 
 
+class FakeGui:
+    """替代 WeChatGUI 坐标发送；把发送结果写回 FakeAuto，便于断言回显。"""
+
+    def __init__(self, auto):
+        self.auto = auto
+        self.calls = []
+
+    def _record(self, echo_text):
+        self.auto.sent.append(echo_text)
+        self.auto.normal_rows.append(
+            make_row((7, 100 + len(self.auto.sent)), echo_text, "nide", top=220, bottom=270))
+        self.auto.attach_rows()
+        if self.auto.after_send:
+            self.auto.after_send()
+        return SimpleNamespace(is_success=True, message="ok")
+
+    def send_msg(self, text, who=None, verify=False):
+        self.calls.append(("send", who, text))
+        return self._record(text)
+
+    def at_member(self, member, text, who=None, verify=False):
+        self.calls.append(("at", who, member, text))
+        return self._record(f"@{member}  " + text)
+
+
 class Wechat4AdapterTests(unittest.TestCase):
     def setUp(self):
         self.auto = FakeAuto()
         self.client = Wechat4Adapter(self.auto, profile(), "目标群", "微信", log=lambda message: None,
                                      expected_pid=41)
+        self.gui = FakeGui(self.auto)
+        self.client._gui = self.gui
 
     def assert_no_clicks(self):
         self.assertEqual(self.auto.opened_menus, [])

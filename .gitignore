@@ -10,3 +10,5 @@ logs/
 python版/config.json
 python版/config.json.*
 python版/profiles/local*.json
+# 第三方仓库调研副本（源码已 vendor 到 python版/vendor/）
+references/
