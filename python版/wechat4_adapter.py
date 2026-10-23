@@ -361,12 +361,12 @@ class Wechat4Adapter(WindowsChatAdapter):
         self._menu_identity_captured = True
 
     @staticmethod
-    def _wait_for(read, ready):
-        for attempt in range(11):
+    def _wait_for(read, ready, attempts=11):
+        for attempt in range(attempts):
             value = read()
             if ready(value):
                 return value
-            if attempt < 10:
+            if attempt < attempts - 1:
                 time.sleep(0.05)
         return value
 
@@ -384,7 +384,8 @@ class Wechat4Adapter(WindowsChatAdapter):
                     raise AdapterConfigurationError("取消多选按钮所属进程不符")
                 self._foreground_is_ours()
                 buttons[0].Click(waitTime=0.1)
-                remaining = self._wait_for(self._cancel_buttons, lambda value: not value)
+                # 微信退出多选偶发慢于半秒；只延长等待，不点击第二次、不放宽复核。
+                remaining = self._wait_for(self._cancel_buttons, lambda value: not value, attempts=41)
                 if remaining:
                     raise AdapterConfigurationError("取消多选按钮仍存在")
             else:
