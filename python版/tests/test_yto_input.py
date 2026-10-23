@@ -89,6 +89,19 @@ class YtoWrappedMessageTests(unittest.TestCase):
         body.children = [Node("14:09", kind="TextControl")]
         self.assertIsNone(self.parse(row))
 
+    def test_blank_separator_nodes_do_not_duplicate_sender(self):
+        # 本人气泡头部是「时间 + 空白节点 + 昵称」，空白不能算第二个发送者。
+        row, _, header, _ = wrapped_message()
+        header.children = [
+            Node("12:06", kind="TextControl"),
+            Node(" ", kind="TextControl"),
+            Node("小海", kind="TextControl"),
+        ]
+        config = dict(profile(), parser="yto", self_names=["小海"])
+        parsed = adapter.parse_message(row, config, "客户管家")
+        self.assertEqual(parsed.sender, "小海")
+        self.assertTrue(parsed.is_self)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -149,7 +149,9 @@ def parse_message(row, profile, namespace):
             children = row.GetChildren()
             groups = [n for n in children if n.ControlTypeName == "GroupControl"]
             body = groups[-1] if groups else None
-        names = [n.Name for n in children if n.ControlTypeName == "TextControl" and n.Name and not _TIME.fullmatch(n.Name.strip())]
+        names = [n.Name.strip() for n in children
+                 if n.ControlTypeName == "TextControl" and str(n.Name or "").strip()
+                 and not _TIME.fullmatch(str(n.Name).strip())]
         if body is None:
             # 无正文容器时整行可能只是时间分割或系统提示，不应中断消息读取。
             if _time_only(_text(row)):
