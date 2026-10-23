@@ -1,7 +1,7 @@
 {
   "_说明": "适配格式示例，复制成local.json并按本机诊断核对，填写本账号在两边的完整群昵称。右键比例点必须单独确认。先用Ctrl+T准备检查；通过不代表实际发送或@已验收。微信只有空窗格时修改选择器无效。",
   "wx": {
-    "window": {"name": "微信", "depth": 1},
+    "window": {"name_regex": "微信|Weixin", "depth": 1},
     "process_name": "Weixin.exe",
     "group_title": {"type": "TextControl", "name": "{group}", "depth": 30},
     "messages": {"automation_id": "chat_message_list", "depth": 30},
