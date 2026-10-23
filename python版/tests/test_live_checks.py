@@ -34,8 +34,9 @@ class FakeAdapters:
         self.restore_error = None
         self.log = lambda message: None
 
-    def factory(self, cfg, log):
+    def factory(self, cfg, log, need=None):
         self.log = log
+        self.need = need
         return self
 
     def __enter__(self):

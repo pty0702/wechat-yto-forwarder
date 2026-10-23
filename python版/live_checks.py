@@ -110,8 +110,10 @@ def run_live_check(cfg, output_dir, stop_event, log=print, *, side=None, mention
             record["group"] = ({key: live_cfg[key + "_group"] for key in ("wx", "kf")}
                                if side is None else live_cfg[side + "_group"])
             record["phase"] = "prepare"
-            emit("[联调] 正在核对双端窗口并建立历史快照")
-            with create_live_adapters(live_cfg, adapter_log) as adapters:
+            need = ("wx", "kf") if side is None else (side,)
+            emit("[联调] 正在核对" + ("双端窗口并建立历史快照" if side is None
+                                      else "发送端窗口并建立历史快照"))
+            with create_live_adapters(live_cfg, adapter_log, need=need) as adapters:
                 try:
                     if stop_event.is_set():
                         record["status"] = "cancelled"

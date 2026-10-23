@@ -504,7 +504,15 @@ def _wechat_session(pid, log):
 
 
 @contextmanager
-def create_live_adapters(cfg, log=print):
+def create_live_adapters(cfg, log=print, need=None):
+    """装配真实双端适配器；need 指定本次要准备的端（默认两端都准备）。
+
+    单条发送验收只传发送端，避免为发一条消息强制核对另一端界面。
+    """
+    if need is None:
+        need = ("wx", "kf")
+    if not need or any(side not in ("wx", "kf") for side in need):
+        raise AdapterConfigurationError("need 只能包含 wx 或 kf")
     profile_path = cfg.get("adapter_profile", "")
     if not profile_path:
         raise AdapterConfigurationError("请先选择客户端适配 JSON 文件")
@@ -512,35 +520,36 @@ def create_live_adapters(cfg, log=print):
     wx_mention = (profile["wx"].get("parser") == "wechat4"
                   and profile["wx"].get("mention_mode") == "wechat4")
     if (cfg.get("at_keywords") and not wx_mention
-            and not all(profile["wx"].get(key) for key in ("mention_item", "mention_token"))):
+            and not all(profile["wx"].get(key) for key in ("mention_item", "mention_token"))
+            and profile["wx"].get("parser") != "wechat_db"):
         raise AdapterConfigurationError("设置了 @客服词，但微信适配配置尚未提供真实 @ 控件")
     auto = _automation()
     if not isinstance(cfg.get("wechat_accessibility", False), bool):
         raise AdapterConfigurationError("微信兼容开关必须为布尔值")
     with auto.UIAutomationInitializerInThread(), ExitStack() as contexts:
-        if profile["wx"].get("parser") == "wechat_db":
+        wx = None
+        kf = None
+        if "wx" in need and profile["wx"].get("parser") == "wechat_db":
             # 读走微信本地库、发走坐标/OCR：不绑定 UIA 窗口，也不需要无障碍兼容。
             from wechat_db_adapter import WechatDbAdapter
             wx = WechatDbAdapter(profile["wx"], cfg["wx_group"], log)
-            kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
             wx.prepare()
+        elif "wx" in need:
+            wx_window = select(auto.GetRootControl(), profile["wx"]["window"], "微信窗口")
+            pid = wx_window.ProcessId
+            if cfg.get("wechat_accessibility", False):
+                contexts.enter_context(_wechat_session(pid, log))
+                # 等 UIA 树暴露 mmui 控件，避免刚开启就取标题/输入框落空。
+                time.sleep(0.5)
+            wx_class = WindowsChatAdapter
+            if profile["wx"].get("parser") == "wechat4":
+                from wechat4_adapter import Wechat4Adapter
+                wx_class = Wechat4Adapter
+            wx = wx_class(auto, profile["wx"], cfg["wx_group"], "微信", log, expected_pid=pid)
+            wx.prepare()
+        if "kf" in need:
+            kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
             kf.prepare()
-            yield wx, wx, kf, kf
-            return
-        wx_window = select(auto.GetRootControl(), profile["wx"]["window"], "微信窗口")
-        pid = wx_window.ProcessId
-        if cfg.get("wechat_accessibility", False):
-            contexts.enter_context(_wechat_session(pid, log))
-            # 等 UIA 树暴露 mmui 控件，避免刚开启就取标题/输入框落空。
-            time.sleep(0.5)
-        wx_class = WindowsChatAdapter
-        if profile["wx"].get("parser") == "wechat4":
-            from wechat4_adapter import Wechat4Adapter
-            wx_class = Wechat4Adapter
-        wx = wx_class(auto, profile["wx"], cfg["wx_group"], "微信", log, expected_pid=pid)
-        kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
-        wx.prepare()
-        kf.prepare()
         yield wx, wx, kf, kf
 
 
