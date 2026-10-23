@@ -727,8 +727,10 @@ class Wechat4AdapterTests(unittest.TestCase):
         self.client._rows()
         self.client._sender_cache[((7, 101), "测试发送")] = "nide"
         self.auto.after_send = lambda: setattr(self.auto.normal_rows[-1], "sender", "Zlient")
-        with self.assertRaises(SendUncertainError):
-            self.client.send("测试发送")
+        with patch("windows_adapter.time.monotonic", side_effect=[0, 0, 20]), \
+                patch("windows_adapter.time.sleep"):
+            with self.assertRaises(SendUncertainError):
+                self.client.send("测试发送")
         self.assertEqual(self.auto.sent, ["测试发送"])
         self.assertEqual(len(self.auto.cancel.clicks), 3)
         self.assertFalse(self.client._fresh_mapping)

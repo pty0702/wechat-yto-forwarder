@@ -60,6 +60,35 @@ class YtoWrappedMessageTests(unittest.TestCase):
             with self.subTest(ambiguity=ambiguity), self.assertRaises(adapter.AdapterConfigurationError):
                 self.parse(row)
 
+    def test_time_only_row_is_skipped_instead_of_failing_the_batch(self):
+        row = Node(automation_id="123456", children=[
+            Node(children=[Node(children=[Node("今天 14:09", kind="TextControl")])]),
+        ])
+        self.assertIsNone(self.parse(row))
+
+    def test_self_bubble_without_nickname_uses_single_self_name(self):
+        row, _, header, _ = wrapped_message()
+        header.children = [Node("今天 14:09", kind="TextControl")]
+        config = dict(profile(), parser="yto", self_names=["圆通快递"])
+        parsed = adapter.parse_message(row, config, "客户管家")
+        self.assertEqual(parsed.sender, "圆通快递")
+        self.assertTrue(parsed.is_self)
+        self.assertEqual(parsed.content, "YT0719078698064 第一行\n第二行")
+
+    def test_nameless_bubble_without_unique_self_name_is_rejected(self):
+        row, _, header, _ = wrapped_message()
+        header.children = [Node("今天 14:09", kind="TextControl")]
+        for self_names in (["本人", "另一账号"], []):
+            config = dict(profile(), parser="yto", self_names=self_names)
+            with self.subTest(self_names=self_names), self.assertRaises(adapter.AdapterConfigurationError):
+                adapter.parse_message(row, config, "客户管家")
+
+    def test_nameless_empty_or_time_body_is_skipped(self):
+        row, _, header, body = wrapped_message()
+        header.children = [Node("今天 14:09", kind="TextControl")]
+        body.children = [Node("14:09", kind="TextControl")]
+        self.assertIsNone(self.parse(row))
+
 
 if __name__ == "__main__":
     unittest.main()

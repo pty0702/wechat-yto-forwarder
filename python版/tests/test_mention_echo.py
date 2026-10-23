@@ -142,7 +142,7 @@ class MentionEchoTests(unittest.TestCase):
 
     def send(self):
         # 最多执行一轮回显核验，失败分支无需实际等待三秒。
-        with patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), \
+        with patch.object(adapter.time, "monotonic", side_effect=[0, 0, 20]), \
                 patch.object(adapter.time, "sleep"):
             self.client.send_mention("客服", "示例正文")
 

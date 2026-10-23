@@ -22,6 +22,10 @@ class AdapterConfigurationError(ValueError):
     """客户端控件与配置不匹配，需要诊断后调整。"""
 
 
+# 发送回显确认窗口：需覆盖消息渲染与微信多选往返读取身份的耗时。
+ECHO_TIMEOUT_SECONDS = 12.0
+
+
 def walk(root, depth=20, include_root=False, limit=10000):
     """有深度和节点上限的前序遍历，保持消息在控件树中的顺序。"""
     stack = [(root, 0)]
@@ -116,7 +120,14 @@ def literal_keys(text):
 _TIME = re.compile(r"(?:(?:今天|昨天|\d{1,2}月\d{1,2}日)\s*)?\d{1,2}:\d{2}(?::\d{2})?")
 
 
+def _time_only(text):
+    """整段文本只有空白与时间戳时，不是聊天消息行。"""
+    lines = [line.strip() for line in (text or "").splitlines()]
+    return all(not line or _TIME.fullmatch(line) for line in lines)
+
+
 def parse_message(row, profile, namespace):
+    """解析一条消息；返回 None 表示该行不是消息（时间分割等），调用方应跳过。"""
     parser = profile.get("parser", "selectors")
     if parser == "yto":
         # 客户管家 WebView2 布局：消息编号外壳内的 news-box 分为发送者行和正文。
@@ -139,10 +150,26 @@ def parse_message(row, profile, namespace):
             groups = [n for n in children if n.ControlTypeName == "GroupControl"]
             body = groups[-1] if groups else None
         names = [n.Name for n in children if n.ControlTypeName == "TextControl" and n.Name and not _TIME.fullmatch(n.Name.strip())]
-        if len(names) != 1 or body is None:
+        if body is None:
+            # 无正文容器时整行可能只是时间分割或系统提示，不应中断消息读取。
+            if _time_only(_text(row)):
+                return None
             raise AdapterConfigurationError("客户管家消息行结构发生变化，无法唯一识别发送者")
-        sender = names[0]
+        if len(names) > 1:
+            raise AdapterConfigurationError("客户管家消息行结构发生变化，无法唯一识别发送者")
         content = _text(body)
+        if len(names) == 1:
+            sender = names[0]
+        elif not content.strip() or _time_only(content):
+            return None
+        else:
+            # 本人气泡可能不显示昵称；仅当本账号昵称唯一配置时才可判定来源。
+            self_names = [str(name).strip() for name in profile.get("self_names", [])
+                          if str(name).strip()]
+            if len(self_names) == 1:
+                sender = self_names[0]
+            else:
+                raise AdapterConfigurationError("客户管家消息行结构发生变化，无法唯一识别发送者")
         # 卡片中的摘要可能截断，不能当作机器人完整文本回复搬运。
         kind = "media" if any(n.ControlTypeName in {"ImageControl", "ButtonControl"}
                               for n in walk(body, 12)) else "text"
@@ -238,8 +265,12 @@ class WindowsChatAdapter:
     def _rows(self):
         window = self._bind()
         container = select(window, self.profile["messages"], "消息列表")
-        return [parse_message(row, self.profile, self.namespace)
-                for row in find_all(container, self.profile["message_item"])]
+        rows = []
+        for row in find_all(container, self.profile["message_item"]):
+            parsed = parse_message(row, self.profile, self.namespace)
+            if parsed is not None:
+                rows.append(parsed)
+        return rows
 
     def prepare(self):
         window = self._bind()
@@ -382,7 +413,8 @@ class WindowsChatAdapter:
             # 自此即使按键 API 抛异常，也不能证明消息未发出。
             attempted = True
             self._enter(edit)
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + ECHO_TIMEOUT_SECONDS
+            last_scan = {"rows": 0, "anchor": False, "self_new": 0, "body_match": 0}
             while time.monotonic() < deadline:
                 # 发送后客户端可能稍晚才清空草稿；先等清空，避免带草稿进入微信多选。
                 if self._value(edit):
@@ -391,12 +423,33 @@ class WindowsChatAdapter:
                 after = self._rows()
                 anchors = [i for i, row in enumerate(after) if row.message_id == anchor]
                 # 控件整体重建后同文历史可能获得新ID；没有原尾锚点就不能证明追加。
-                if len(anchors) == 1 and not self._value(edit):
+                scan = {"rows": len(after), "anchor": len(anchors) == 1, "self_new": 0, "body_match": 0}
+                if scan["anchor"] and not self._value(edit):
                     for row in after[anchors[0] + 1:]:
-                        if row.message_id not in before and row.is_self and _normalized(row.content) == echo_expected:
-                            return
+                        if row.message_id in before:
+                            continue
+                        if row.is_self:
+                            scan["self_new"] += 1
+                        if _normalized(row.content) == echo_expected:
+                            scan["body_match"] += 1
+                            if row.is_self:
+                                return
+                last_scan = scan
                 time.sleep(0.15)
-            raise SendUncertainError("发送后未找到本账号的完整消息回显，请人工核对；已停止，避免重复发送")
+            # 只报告计数与结构原因，不把消息正文写入错误或日志。
+            if not last_scan["anchor"]:
+                reason = "发送前尾锚点在发送后未命中，可能列表重建"
+            elif not last_scan["self_new"]:
+                reason = "锚点后没有识别为本人的新消息"
+            elif not last_scan["body_match"]:
+                reason = "本人新消息与预期回显正文不一致"
+            else:
+                reason = "回显未同时满足本人身份与完整正文"
+            raise SendUncertainError(
+                f"发送后未找到本账号的完整消息回显（{reason}；"
+                f"新消息 {last_scan['rows']} 条，本人新消息 {last_scan['self_new']} 条，"
+                f"正文一致 {last_scan['body_match']} 条），请人工核对；已停止，避免重复发送"
+            )
         except SendUncertainError:
             raise
         except Exception as exc:

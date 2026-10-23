@@ -424,14 +424,14 @@ class SendTests(unittest.TestCase):
             self.auto.echo, self.auto.echo_sender = echo, sender
             self.auto.draft = ""
             with self.subTest(echo=echo, sender=sender):
-                with patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+                with patch.object(adapter.time, "monotonic", side_effect=[0, 0, 20]), patch.object(adapter.time, "sleep"):
                     with self.assertRaises(SendUncertainError):
                         self.client.send("测试")
 
     def test_existing_identical_self_message_is_not_send_confirmation(self):
         self.auto.messages.children.append(row("2", "本人", "测试"))
         self.auto.echo = False
-        with patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+        with patch.object(adapter.time, "monotonic", side_effect=[0, 0, 20]), patch.object(adapter.time, "sleep"):
             with self.assertRaises(SendUncertainError):
                 self.client.send("测试")
 
@@ -455,7 +455,7 @@ class SendTests(unittest.TestCase):
             self.auto.messages.children = [row("rebuilt-self", "本人", "测试")]
             self.auto.draft = ""
 
-        with self._after_submit(rebuild), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+        with self._after_submit(rebuild), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 20]), patch.object(adapter.time, "sleep"):
             with self.assertRaises(SendUncertainError):
                 self.client.send("测试")
         self.assertEqual(self.auto.sent, ["测试"])
@@ -469,13 +469,13 @@ class SendTests(unittest.TestCase):
             self.auto.messages.children.insert(1, row("revealed-history", "本人", "测试"))
             self.auto.draft = ""
 
-        with self._after_submit(reveal_older_history), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+        with self._after_submit(reveal_older_history), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 20]), patch.object(adapter.time, "sleep"):
             with self.assertRaises(SendUncertainError):
                 self.client.send("测试")
         self.assertEqual(self.auto.sent, ["测试"])
 
     def test_new_self_echo_does_not_confirm_send_while_draft_remains(self):
-        with self._after_submit(lambda: setattr(self.auto, "draft", "测试")), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 4]), patch.object(adapter.time, "sleep"):
+        with self._after_submit(lambda: setattr(self.auto, "draft", "测试")), patch.object(adapter.time, "monotonic", side_effect=[0, 0, 20]), patch.object(adapter.time, "sleep"):
             with self.assertRaises(SendUncertainError):
                 self.client.send("测试")
         self.assertEqual(self.auto.sent, ["测试"])
