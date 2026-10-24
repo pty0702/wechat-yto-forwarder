@@ -77,14 +77,18 @@ class WechatDbAdapter:
     def fetch_new(self):
         if self._chat_id is None:
             raise AdapterConfigurationError("微信数据库适配器尚未 prepare")
-        rows = self._wechat_db().get_new_messages(self._chat_id, since_seq=self._since_seq, limit=200)
+        rows = self._wechat_db().get_messages(self._chat_id, limit=50)
         messages = []
         for row in rows:
-            self._since_seq = max(self._since_seq, int(row.get("sort_seq") or 0))
+            seq = int(row.get("sort_seq") or 0)
+            if seq <= self._since_seq:
+                continue
             msg = self._to_message(row)
             if msg is not None:
                 messages.append(msg)
-        return messages
+        if rows:
+            self._since_seq = max(self._since_seq, max(int(r.get("sort_seq") or 0) for r in rows))
+        return list(reversed(messages))
 
     def fetch_replies(self, bot_name):
         return [msg for msg in self.fetch_new() if msg.sender == bot_name]
@@ -126,10 +130,17 @@ class WechatDbAdapter:
         if not getattr(response, "is_success", False):
             raise SendUncertainError(f"发送结果不确定，请人工核对：{response}")
         expected = text.strip()
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            fresh = db.get_new_messages(self._chat_id, since_seq=before_seq, limit=50)
-            for row in fresh:
+            # 微信写库异步：get_new_messages 在落库初期可能漏行，改扫最近消息。
+            try:
+                recent = db.get_messages(self._chat_id, limit=30)
+            except Exception:
+                time.sleep(0.4)
+                continue
+            for row in recent:
+                if int(row.get("sort_seq") or 0) <= before_seq:
+                    continue
                 msg = self._to_message(row)
                 if msg is None or not msg.is_self:
                     continue
@@ -140,7 +151,7 @@ class WechatDbAdapter:
                 if matched:
                     self._since_seq = max(self._since_seq, int(row.get("sort_seq") or 0))
                     return
-            time.sleep(0.3)
+            time.sleep(0.4)
         raise SendUncertainError(
             "发送后未在微信数据库确认到本账号消息，请人工核对；已停止，避免重复发送")
 
