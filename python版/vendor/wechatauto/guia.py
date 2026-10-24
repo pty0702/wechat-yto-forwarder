@@ -2041,8 +2041,9 @@ class WeChatGUI:
                 # open_chat 都重扫侧栏/点击，是逐条发送的主要耗时点）
                 if not (who == getattr(self, '_current_chat', None)
                         and self._chat_is_open(who)):
-                    if not self.open_chat(who):
-                        stuck = '会话没打开（侧栏/搜索都没命中，或界面不在聊天页）'
+                    # 本项目修改：打开后必须核对会话，避免消息进入别的群或私聊。
+                    if not self.open_chat(who) or not self._chat_is_open(who):
+                        stuck = '会话没打开或打开的不是目标会话（侧栏/搜索可能点错）'
                         wxlog.debug(f'open_chat 未确认（attempt={attempt}），重试')
                         continue
                     self._current_chat = who
@@ -2581,10 +2582,22 @@ class WeChatGUI:
         if not self.ensure_visible():
             return WxResponse.failure('微信窗口不可见（可能锁屏/会话断开）')
         if who:
-            self.open_chat(who)
-            time.sleep(0.8)
+            # 本项目修改：目标会话已打开就不动界面；需要切换时打开后必须核对，
+            # 绝不把 @ 和正文打进别的群或私聊输入框。
+            if not self._chat_is_open(who):
+                if not self.open_chat(who) or not self._chat_is_open(who):
+                    return WxResponse.failure(f'未打开目标会话，已停止发送：{who}')
+            time.sleep(0.5)
         if not self.focus_input():
             return WxResponse.failure('输入框不可用')
+        # 本项目修改：进入目标会话后先清空输入框残留，避免旧草稿混入本次 @ 消息。
+        self._input.key(0x41, ctrl=True)
+        time.sleep(0.15)
+        self._input.key(0x2E)
+        time.sleep(0.3)
+        box = self.get_input_box()
+        if box and self._input_box_has_text(box):
+            return WxResponse.failure('输入框残留草稿清不掉，已停止发送；请手动清理')
         box = None
         typed = False
         # 本项目修改：坐标随窗口移动会漂移。键入后草稿为空则重校准并重试一次，
