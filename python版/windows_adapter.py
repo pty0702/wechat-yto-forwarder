@@ -218,14 +218,19 @@ def load_profile(path):
         if not isinstance(item, dict):
             raise AdapterConfigurationError(f"适配配置缺少 {side} 对象")
         parser = item.get("parser", "selectors")
-        if parser not in {"selectors", "yto", "wechat4", "wechat_db"}:
+        if parser not in {"selectors", "yto", "yto_dom", "wechat4", "wechat_db"}:
             raise AdapterConfigurationError(f"{side} 消息解析器不受支持")
         if parser == "wechat4" and side != "wx":
             raise AdapterConfigurationError("wechat4 解析器只能用于微信端")
         if parser == "wechat_db" and side != "wx":
             raise AdapterConfigurationError("wechat_db 解析器只能用于微信端")
+        if parser == "yto_dom" and side != "kf":
+            raise AdapterConfigurationError("yto_dom 解析器只能用于客户管家端")
         if parser == "wechat_db":
             # 数据库通道不读 UIA 树，只需本账号身份用于排除本人消息。
+            if not item.get("self_names"):
+                raise AdapterConfigurationError(f"{side} 缺少 self_names 配置")
+        elif parser == "yto_dom":
             if not item.get("self_names"):
                 raise AdapterConfigurationError(f"{side} 缺少 self_names 配置")
         else:
@@ -548,7 +553,11 @@ def create_live_adapters(cfg, log=print, need=None):
             wx = wx_class(auto, profile["wx"], cfg["wx_group"], "微信", log, expected_pid=pid)
             wx.prepare()
         if "kf" in need:
-            kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
+            if profile["kf"].get("parser") == "yto_dom":
+                from kf_dom_adapter import KfDomAdapter
+                kf = KfDomAdapter(profile["kf"], cfg["kf_group"], log)
+            else:
+                kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
             kf.prepare()
         yield wx, wx, kf, kf
 
