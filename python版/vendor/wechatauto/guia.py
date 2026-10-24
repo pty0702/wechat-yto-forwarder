@@ -2692,33 +2692,47 @@ class WeChatGUI:
             return WxResponse.failure('粘贴 @ 昵称后输入框仍为空，未执行发送；请检查窗口焦点')
         # 本项目修改：OCR 窗口收紧到输入框正上方（联想弹层实际出现的位置，
         # 实测候选距输入框顶 60~130px）。窗口过宽会把消息区里含昵称的历史行
-        # 当候选点进去（点到消息区会丢草稿）；命中昵称的候选取 y 最大
-        # （最贴近输入框）的一项，避免拿到更上方消息区的同名文字。
+        # 当候选点进去（点到消息区会丢草稿）。
+        # 候选选择纪律（2026-10-25 打包版实测 @ 错人后收紧）：
+        # 1) 只点 OCR 文本含昵称的候选；微信联想按匹配度排序，精确匹配在
+        #    第一项，多项命中取 y 最小（列表顶部）；取底部曾点到变体成员
+        #    发出 @ 错人的消息；
+        # 2) 没有精确命中就失败停发，绝不盲点任何一项——宁可不发不可错发。
         if box is None:
             box = self.get_input_box()
         box_top = box[1] if box else int(self.render_h * 0.70)
         popup = (self.right_pane_left, max(80, box_top - 300), self.render_w, box_top)
         items = self.ocr(popup)
         target = None
-        best_y = -1
+        best_y = None
         for t, x, yy, w, h in items:
-            if member in t or t.startswith(member):
-                if yy > best_y:
+            if t.strip() == member or t.strip().startswith(member):
+                if best_y is None or yy < best_y:
                     best_y = yy
                     target = rhythm.point((x, yy, x + w, yy + h))
-        if not target and items:
-            t, x, yy, w, h = max(items, key=lambda it: it[2])
-            target = rhythm.point((x, yy, x + w, yy + h))
         if not target:
-            return WxResponse.failure(f'候选弹层中没有可选项：{member}')
-        self.wx_click(self.origin_x + target[0], self.origin_y + target[1])
+            return WxResponse.failure(f'候选弹层中没有「{member}」的精确候选，已停止发送')
+        # 本项目修改：点击落点必须落在右面板弹层区内（x 距右面板左界至少
+        # 50px）。坐标错位时会点到左侧会话列表把会话切走，正文+回车就发进
+        # 别的聊天（2026-10-25 打包版实测事故）。宁可停发不可错发。
+        px = self.origin_x + target[0]
+        py = self.origin_y + target[1]
+        if px < self.origin_x + self.right_pane_left + 50 or py > self.origin_y + box_top:
+            return WxResponse.failure(f'候选坐标异常（{px},{py}），不在弹层区，已停止发送')
+        self.wx_click(px, py)
         time.sleep(0.5)
+        # 点候选是全程唯一可能切走会话的操作，点完立刻核对会话。
+        if who and not self._chat_is_open(who):
+            return WxResponse.failure('点击候选后会话被切走，已停止发送')
         # 本项目修改：@ 选中后整个提及对象在输入框里是一个 U+FFFC 内嵌对象
-        # （2026-10-25 探针实测，UIA 只能读到 '\ufffc'）；未选中（纯文本 '@昵称'）
-        # 或点丢（空草稿）都不允许继续，防止发出不带 @ 的纯文本。
+        # （2026-10-25 探针实测，UIA 只能读到 '\ufffc'）。纯文本 '@昵称' 说明
+        # 候选没被真正选中（点到弹层外会保持纯文本且丢焦点）——必须 FFFC
+        # 才算选中；UIA 暂时读不到时重读一次，仍读不到就停发。
         got = self._draft_via_uia()
-        if got is not None and (not got.strip()
-                                or ('\ufffc' not in got and member not in got)):
+        if got is None:
+            time.sleep(0.4)
+            got = self._draft_via_uia()
+        if got is None or '\ufffc' not in got:
             return WxResponse.failure(f'点击候选后 @ 未选中（草稿={got!r}），已停止发送')
         if text:
             # 本项目修改：正文不能走 input_text——它会 Ctrl+A 清空，把已选中的
@@ -2730,6 +2744,9 @@ class WeChatGUI:
             got = self._draft_via_uia()
             if got is not None and text[:4] not in got:
                 return WxResponse.failure(f'正文未落框（草稿={got!r}），已停止发送')
+        # 发送前最后一道会话核对：正文粘贴期间界面若被切走，回车会发错地方。
+        if who and not self._chat_is_open(who):
+            return WxResponse.failure('发送前会话核对失败，已停止发送')
         self._pending_text = text or None
         if not self.click_send():
             return WxResponse.failure('回车与发送按钮均未能发出消息，已停止发送')
