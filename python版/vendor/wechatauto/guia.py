@@ -2586,6 +2586,10 @@ class WeChatGUI:
         if not self.focus_input():
             return WxResponse.failure('输入框不可用')
         self._input.type_unicode('@')
+        time.sleep(0.5)
+        # 本项目修改：先键入昵称过滤候选。群大时只打 '@' 候选远多于 OCR 识别区，
+        # 目标不在可见区会误报「未在成员列表中找到」。
+        self._input.type_unicode(member)
         time.sleep(0.9)
         box = self.get_input_box()
         popup = (self.right_pane_left, max(80, (box[1] if box else int(self.render_h * 0.49)) - 500),
