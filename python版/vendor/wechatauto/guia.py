@@ -1951,6 +1951,25 @@ class WeChatGUI:
             return False
         return True
 
+    def _draft_cleared(self) -> bool:
+        """回车/点按钮后判定草稿是否已清空（即消息真正发出）。
+
+        像素探测在空输入框上常把光标/边框误报为文字（2026-10-25 实测：
+        @ 消息第一次回车已发出，却因误报连发 3 次回车并误判失败）。
+        UIA 回读可靠时优先用它；读不到才退回像素。
+        """
+        got = self._draft_via_uia()
+        if got is not None:
+            return not got.strip()
+        return not self._input_box_has_text(getattr(self, '_last_input_box', None))
+
+    def _draft_present(self, box=None) -> bool:
+        """发送前判定输入框是否有待发文字；UIA 优先，读不到退像素。"""
+        got = self._draft_via_uia()
+        if got is not None:
+            return bool(got.strip())
+        return self._input_box_has_text(box)
+
     def click_send(self, fast: bool = False) -> bool:
         """发送消息并确认输入框已清空。
 
@@ -1973,20 +1992,20 @@ class WeChatGUI:
         rhythm.gate('send')
         box = getattr(self, '_last_input_box', None)
         if fast:
-            if not self._input_box_has_text(box):
+            if not self._draft_present(box):
                 return False
             self._input.key(VK_RETURN)
             rhythm.nap(0.5)
-            if not self._input_box_has_text(box):
+            if self._draft_cleared():
                 return True
             return False
         for attempt in range(3):
-            if not self._input_box_has_text(box):
+            if not self._draft_present(box):
                 wxlog.debug('发送前输入框无文字，跳过空发')
                 return False
             self._input.key(VK_RETURN)
             rhythm.nap(1.0)
-            if not self._input_box_has_text(box):
+            if self._draft_cleared():
                 return True
             wxlog.debug(f'回车发送未生效（attempt={attempt}），改用「发送」按钮')
             res = self.ocr(self.send_button_region)
@@ -2000,9 +2019,15 @@ class WeChatGUI:
                     clicked = True
                     break
             if not clicked:
-                return False
+                # 本项目修改：微信 4.x 发送按钮常为纯图标无文字，OCR 认不出；
+                # 直接点布局校准出的发送按钮区域中心。
+                x0, y0, x1, y1 = self.send_button_region
+                px, py = rhythm.point((self.origin_x + x0, self.origin_y + y0,
+                                       self.origin_x + x1, self.origin_y + y1))
+                self.wx_click(px, py)
+                clicked = True
             rhythm.nap(1.0)
-            if not self._input_box_has_text(box):
+            if self._draft_cleared():
                 return True
         return False
 
@@ -2665,31 +2690,49 @@ class WeChatGUI:
                     break
         if not typed:
             return WxResponse.failure('粘贴 @ 昵称后输入框仍为空，未执行发送；请检查窗口焦点')
-        popup = (self.right_pane_left, max(80, (box[1] if box else int(self.render_h * 0.49)) - 500),
-                 self.render_w, (box[1] if box else int(self.render_h * 0.77)))
+        # 本项目修改：OCR 窗口收紧到输入框正上方（联想弹层实际出现的位置，
+        # 实测候选距输入框顶 60~130px）。窗口过宽会把消息区里含昵称的历史行
+        # 当候选点进去（点到消息区会丢草稿）；命中昵称的候选取 y 最大
+        # （最贴近输入框）的一项，避免拿到更上方消息区的同名文字。
+        if box is None:
+            box = self.get_input_box()
+        box_top = box[1] if box else int(self.render_h * 0.70)
+        popup = (self.right_pane_left, max(80, box_top - 300), self.render_w, box_top)
         items = self.ocr(popup)
         target = None
-        # 本项目修改：优先点名称含昵称的候选；没有精确命中就默认点第一个候选，
-        # 只有弹层完全无候选时才失败。
+        best_y = -1
         for t, x, yy, w, h in items:
             if member in t or t.startswith(member):
-                target = rhythm.point((x, yy, x + w, yy + h))
-                break
+                if yy > best_y:
+                    best_y = yy
+                    target = rhythm.point((x, yy, x + w, yy + h))
         if not target and items:
-            t, x, yy, w, h = items[0]
+            t, x, yy, w, h = max(items, key=lambda it: it[2])
             target = rhythm.point((x, yy, x + w, yy + h))
         if not target:
             return WxResponse.failure(f'候选弹层中没有可选项：{member}')
         self.wx_click(self.origin_x + target[0], self.origin_y + target[1])
-        time.sleep(0.35)
-        # 本项目修改：点候选可能误点到消息区把草稿点丢（实测发生过），粘贴正文前
-        # 校验草稿仍在，避免发出不带 @ 的纯文本。UIA 读不到时保持旧行为放行。
+        time.sleep(0.5)
+        # 本项目修改：@ 选中后整个提及对象在输入框里是一个 U+FFFC 内嵌对象
+        # （2026-10-25 探针实测，UIA 只能读到 '\ufffc'）；未选中（纯文本 '@昵称'）
+        # 或点丢（空草稿）都不允许继续，防止发出不带 @ 的纯文本。
         got = self._draft_via_uia()
-        if got is not None and not got.strip():
-            return WxResponse.failure('点击候选后草稿为空，@ 未生效，已停止发送')
-        if text and not self.input_text(text):
-            return WxResponse.failure('输入消息正文失败')
-        self.click_send()
+        if got is not None and (not got.strip()
+                                or ('\ufffc' not in got and member not in got)):
+            return WxResponse.failure(f'点击候选后 @ 未选中（草稿={got!r}），已停止发送')
+        if text:
+            # 本项目修改：正文不能走 input_text——它会 Ctrl+A 清空，把已选中的
+            # @ 对象一并删掉，发出的就是纯文本（2026-10-25 实测事故）。直接追加粘贴。
+            if not self.set_clipboard(text):
+                return WxResponse.failure('写入剪贴板失败，已停止发送')
+            self._input.key(VK_V, ctrl=True)
+            time.sleep(0.5)
+            got = self._draft_via_uia()
+            if got is not None and text[:4] not in got:
+                return WxResponse.failure(f'正文未落框（草稿={got!r}），已停止发送')
+        self._pending_text = text or None
+        if not self.click_send():
+            return WxResponse.failure('回车与发送按钮均未能发出消息，已停止发送')
         if verify:
             ok = self._verify_sent(text, who, mode='contains', after=mark)
             return (WxResponse.success(f'@成员消息已发送并确认', data={'member': member, 'content': text})
