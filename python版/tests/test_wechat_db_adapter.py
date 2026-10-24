@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -36,16 +37,22 @@ class FakeDb:
 
 
 class FakeGui:
-    def __init__(self):
+    def __init__(self, db=None):
+        self.db = db
         self.calls = []
         self.response = SimpleNamespace(is_success=True, message="ok")
+        self.on_send = None
 
     def send_msg(self, text, who=None, verify=False):
         self.calls.append(("send", who, text, verify))
+        if self.on_send:
+            self.on_send(text)
         return self.response
 
     def at_member(self, member, text, who=None, verify=False):
         self.calls.append(("at", who, member, text, verify))
+        if self.on_send:
+            self.on_send(f"@{member} {text}")
         return self.response
 
 
@@ -60,12 +67,19 @@ def row(seq, sender, content, kind="文本", local_id=1):
 class WechatDbAdapterTests(unittest.TestCase):
     def setUp(self):
         self.db = FakeDb()
-        self.gui = FakeGui()
+        self.gui = FakeGui(self.db)
         self.logs = []
         self.client = WechatDbAdapter(
             {"self_names": ["本人昵称"]}, "潼阳圆通出港群",
             log=self.logs.append, db=self.db, gui=self.gui,
         )
+        self._seq = 0
+
+        def auto_echo(content):
+            self._seq += 1000
+            self.db.rows.append(row(self._seq, "me-wxid", f"me-wxid:\n{content}"))
+
+        self.gui.on_send = auto_echo
 
     def test_strip_sender_prefix_only_removes_exact_header(self):
         self.assertEqual(_strip_sender_prefix("uid:\n正文", "uid"), "正文")
@@ -110,18 +124,16 @@ class WechatDbAdapterTests(unittest.TestCase):
         self.assertEqual(self.client._since_seq, 2000)
         self.assertEqual(self.client.fetch_new(), [])
 
-    def test_send_uses_gui_with_db_verify_and_advances_baseline(self):
+    def test_send_uses_gui_and_confirms_via_db(self):
         self.client.prepare()
         self.client.send("测试文本")
-        self.assertEqual(self.gui.calls, [("send", "潼阳圆通出港群", "测试文本", True)])
-        self.db.rows.append(row(5000, "me-wxid", "me-wxid:\n测试文本"))
-        self.client.send("第二条")
-        self.assertEqual(self.client._since_seq, 5000)
+        self.assertEqual(self.gui.calls, [("send", "潼阳圆通出港群", "测试文本", False)])
+        self.assertEqual(self.client._since_seq, 1000)
 
     def test_send_mention_delegates_at_member(self):
         self.client.prepare()
         self.client.send_mention("圆通快递", "请跟进")
-        self.assertEqual(self.gui.calls, [("at", "潼阳圆通出港群", "圆通快递", "请跟进", True)])
+        self.assertEqual(self.gui.calls, [("at", "潼阳圆通出港群", "圆通快递", "请跟进", False)])
 
     def test_send_failure_or_exception_is_uncertain(self):
         self.client.prepare()
@@ -131,6 +143,14 @@ class WechatDbAdapterTests(unittest.TestCase):
         self.gui.send_msg = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("点击失败"))
         with self.assertRaises(SendUncertainError):
             self.client.send("文本")
+
+    def test_send_uncertain_when_db_never_sees_echo(self):
+        self.client.prepare()
+        self.gui.on_send = None
+        with patch("wechat_db_adapter.time.monotonic", side_effect=[0, 0, 20]), \
+                patch("wechat_db_adapter.time.sleep"):
+            with self.assertRaises(SendUncertainError):
+                self.client.send("查不到的文本")
 
     def test_empty_text_rejected_before_gui(self):
         self.client.prepare()

@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from wechat_forwarder import Message, SendUncertainError
-from windows_adapter import AdapterConfigurationError
+from windows_adapter import AdapterConfigurationError, _normalized
 
 _VENDOR = Path(__file__).resolve().parent / "vendor"
 if str(_VENDOR) not in sys.path:
@@ -103,31 +104,45 @@ class WechatDbAdapter:
         return Message(display, content, message_id=message_id, is_self=is_self, kind=kind)
 
     # ------------------------------------------------------------------
-    # 发送（WeChatGUI + 数据库读回确认）
+    # 发送（WeChatGUI + 本地库读回确认）
     # ------------------------------------------------------------------
     def _send(self, text, staff=None):
         if not isinstance(text, str) or not text:
             raise AdapterConfigurationError("发送文本不能为空")
         if self._chat_id is None:
             raise AdapterConfigurationError("微信数据库适配器尚未 prepare")
+        db = self._wechat_db()
+        rows = db.get_messages(self._chat_id, limit=1)
+        before_seq = int(rows[0].get("sort_seq") or 0) if rows else self._since_seq
         gui = self._wechat_gui()
         try:
+            # verify 交给本模块自己做：wechatauto 内置读回在本机有误报。
             if staff:
-                response = gui.at_member(staff, text, who=self.group, verify=True)
+                response = gui.at_member(staff, text, who=self.group, verify=False)
             else:
-                response = gui.send_msg(text, who=self.group, verify=True)
+                response = gui.send_msg(text, who=self.group, verify=False)
         except Exception as exc:
             raise SendUncertainError(f"发送结果不确定，请人工核对：{exc}") from exc
         if not getattr(response, "is_success", False):
             raise SendUncertainError(f"发送结果不确定，请人工核对：{response}")
-        # 数据库已确认落库；推进基线避免把自己的发送当成新消息读回。
-        try:
-            rows = self._wechat_db().get_messages(self._chat_id, limit=1)
-            if rows:
-                self._since_seq = max(self._since_seq, int(rows[0].get("sort_seq") or 0))
-        except Exception:
-            # 基线推进失败不影响本次发送结果；下轮 fetch_new 会按旧基线去重。
-            pass
+        expected = text.strip()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            fresh = db.get_new_messages(self._chat_id, since_seq=before_seq, limit=50)
+            for row in fresh:
+                msg = self._to_message(row)
+                if msg is None or not msg.is_self:
+                    continue
+                if staff:
+                    matched = expected in msg.content and staff in msg.content
+                else:
+                    matched = _normalized(msg.content).strip() == _normalized(text).strip()
+                if matched:
+                    self._since_seq = max(self._since_seq, int(row.get("sort_seq") or 0))
+                    return
+            time.sleep(0.3)
+        raise SendUncertainError(
+            "发送后未在微信数据库确认到本账号消息，请人工核对；已停止，避免重复发送")
 
     def send(self, text):
         self._send(text)
