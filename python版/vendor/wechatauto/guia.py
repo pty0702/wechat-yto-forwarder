@@ -2585,15 +2585,24 @@ class WeChatGUI:
             time.sleep(0.8)
         if not self.focus_input():
             return WxResponse.failure('输入框不可用')
-        self._input.type_unicode('@')
-        time.sleep(0.5)
-        # 本项目修改：先键入昵称过滤候选。群大时只打 '@' 候选远多于 OCR 识别区，
-        # 目标不在可见区会误报「未在成员列表中找到」。
-        self._input.type_unicode(member)
-        time.sleep(0.9)
-        box = self.get_input_box()
-        # 本项目修改：键入后校验草稿确实进入输入框，否则明确失败，不进入 OCR。
-        if not box or not self._input_box_has_text(box):
+        box = None
+        typed = False
+        # 本项目修改：坐标随窗口移动会漂移。键入后草稿为空则重校准并重试一次，
+        # 仍为空才失败；不再在空输入上继续找候选。
+        for attempt in (1, 2):
+            self._input.type_unicode('@')
+            time.sleep(0.5)
+            self._input.type_unicode(member)
+            time.sleep(0.9)
+            box = self.get_input_box()
+            if box and self._input_box_has_text(box):
+                typed = True
+                break
+            if attempt == 1:
+                self.calibrate_layout()
+                if not self.focus_input():
+                    break
+        if not typed:
             return WxResponse.failure('键入 @ 昵称后输入框仍为空，未执行发送；请检查窗口焦点')
         popup = (self.right_pane_left, max(80, (box[1] if box else int(self.render_h * 0.49)) - 500),
                  self.render_w, (box[1] if box else int(self.render_h * 0.77)))
