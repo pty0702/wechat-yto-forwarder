@@ -2591,22 +2591,28 @@ class WeChatGUI:
         if not self.focus_input():
             return WxResponse.failure('输入框不可用')
         # 本项目修改：进入目标会话后先清空输入框残留，避免旧草稿混入本次 @ 消息。
-        self._input.key(0x41, ctrl=True)
-        time.sleep(0.15)
-        self._input.key(0x2E)
-        time.sleep(0.3)
-        box = self.get_input_box()
-        if box and self._input_box_has_text(box):
-            return WxResponse.failure('输入框残留草稿清不掉，已停止发送；请手动清理')
+        # 微信自绘输入框对 Ctrl+A/Delete 偶发不吃，重试两次并稍等焦点稳定。
+        for clear_try in (1, 2):
+            time.sleep(0.25)
+            self.focus_input()
+            self._input.key(0x41, ctrl=True)
+            time.sleep(0.12)
+            self._input.key(0x2E)
+            time.sleep(0.22)
+            box = self.get_input_box()
+            if not box or not self._input_box_has_text(box):
+                break
+            if clear_try == 2:
+                return WxResponse.failure('输入框残留草稿清不掉，已停止发送；请手动清理')
         box = None
         typed = False
         # 本项目修改：坐标随窗口移动会漂移。键入后草稿为空则重校准并重试一次，
         # 仍为空才失败；不再在空输入上继续找候选。
         for attempt in (1, 2):
             self._input.type_unicode('@')
-            time.sleep(0.5)
+            time.sleep(0.35)
             self._input.type_unicode(member)
-            time.sleep(0.9)
+            time.sleep(0.55)
             box = self.get_input_box()
             if box and self._input_box_has_text(box):
                 typed = True
@@ -2633,7 +2639,7 @@ class WeChatGUI:
         if not target:
             return WxResponse.failure(f'候选弹层中没有可选项：{member}')
         self.wx_click(self.origin_x + target[0], self.origin_y + target[1])
-        time.sleep(0.6)
+        time.sleep(0.35)
         if text and not self.input_text(text):
             return WxResponse.failure('输入消息正文失败')
         self.click_send()
