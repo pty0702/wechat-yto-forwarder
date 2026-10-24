@@ -1756,6 +1756,20 @@ class WeChatGUI:
                 return (self.right_pane_left, y0_abs, self.render_w, y1_abs)
         return None
 
+    def _dismiss_popups(self):
+        """点消息区空白处，关闭 @ 成员联想等浮层。
+
+        联想弹层打开时会截走后续点击与键盘（实测 Ctrl+A/Del 都不生效），
+        浮层无 UIA 控件，只能坐标点击关闭。失败静默，由调用方兜底。
+        """
+        try:
+            mx = (self.right_pane_left + self.render_w) // 2
+            my = int(self.render_h * 0.35)
+            self.wx_click(self.origin_x + mx, self.origin_y + my)
+            time.sleep(0.4)
+        except Exception:
+            pass
+
     def focus_input(self, box: Optional[Tuple[int, int, int, int]] = None) -> bool:
         """点击输入框文本区使其获得焦点。返回是否检测到输入框。
 
@@ -2607,10 +2621,13 @@ class WeChatGUI:
         # 校验用 UIA 回读真实文本；像素探测会把光标/边框误判为文字。读不到则放行。
         for clear_try in (1, 2):
             time.sleep(0.25)
+            if clear_try > 1:
+                # 联想弹层打开时 Ctrl+A/Del 不生效（实测）：先点空白关弹层再清。
+                self._dismiss_popups()
             self.focus_input()
-            self._input.key(0x41, ctrl=True)
+            self._input.key(VK_A, ctrl=True)
             time.sleep(0.12)
-            self._input.key(0x2E)
+            self._input.key(VK_DELETE)
             time.sleep(0.22)
             got = self._draft_via_uia()
             if got is None or not got.strip():
@@ -2619,13 +2636,18 @@ class WeChatGUI:
                 return WxResponse.failure('输入框残留草稿清不掉，已停止发送；请手动清理')
         box = None
         typed = False
-        # 本项目修改：坐标随窗口移动会漂移。键入后草稿为空则重校准并重试一次，
+        # 本项目修改：微信 4.x 输入框不收 SendInput 合成键——type_unicode 与
+        # VK 键都不落框（2026-10-24 实测），改走剪贴板粘贴；'@' 与昵称必须
+        # 分两次粘贴：整串粘贴不触发成员联想弹层，分步粘贴实测会弹层并
+        # 按昵称过滤出目标成员。粘贴后草稿为空则关残留弹层、重校准并重试一次，
         # 仍为空才失败；不再在空输入上继续找候选。
         for attempt in (1, 2):
-            self._input.type_unicode('@')
-            time.sleep(0.35)
-            self._input.type_unicode(member)
-            time.sleep(0.55)
+            if self.set_clipboard('@'):
+                self._input.key(VK_V, ctrl=True)
+                time.sleep(0.45)
+                if self.set_clipboard(member):
+                    self._input.key(VK_V, ctrl=True)
+                    time.sleep(0.9)
             got = self._draft_via_uia()
             if got is not None:
                 if member in got or '@' in got:
@@ -2637,11 +2659,12 @@ class WeChatGUI:
                     typed = True
                     break
             if attempt == 1:
+                self._dismiss_popups()
                 self.calibrate_layout()
                 if not self.focus_input():
                     break
         if not typed:
-            return WxResponse.failure('键入 @ 昵称后输入框仍为空，未执行发送；请检查窗口焦点')
+            return WxResponse.failure('粘贴 @ 昵称后输入框仍为空，未执行发送；请检查窗口焦点')
         popup = (self.right_pane_left, max(80, (box[1] if box else int(self.render_h * 0.49)) - 500),
                  self.render_w, (box[1] if box else int(self.render_h * 0.77)))
         items = self.ocr(popup)
@@ -2659,6 +2682,11 @@ class WeChatGUI:
             return WxResponse.failure(f'候选弹层中没有可选项：{member}')
         self.wx_click(self.origin_x + target[0], self.origin_y + target[1])
         time.sleep(0.35)
+        # 本项目修改：点候选可能误点到消息区把草稿点丢（实测发生过），粘贴正文前
+        # 校验草稿仍在，避免发出不带 @ 的纯文本。UIA 读不到时保持旧行为放行。
+        got = self._draft_via_uia()
+        if got is not None and not got.strip():
+            return WxResponse.failure('点击候选后草稿为空，@ 未生效，已停止发送')
         if text and not self.input_text(text):
             return WxResponse.failure('输入消息正文失败')
         self.click_send()

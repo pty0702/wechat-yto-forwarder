@@ -29,12 +29,29 @@ class _Cdp:
         self._msg_id = 0
 
     def close(self):
-        if self._ws is not None:
-            try:
-                self._ws.close()
-            except Exception:
-                pass
-            self._ws = None
+        ws, loop = self._ws, getattr(self, "_loop", None)
+        self._ws = None
+        if ws is None:
+            return
+        import asyncio
+        # close() 是协程且库内有 keepalive 常驻任务：不排干净会留
+        # "Task was destroyed but it is pending" 告警噪音。
+        try:
+            loop.run_until_complete(ws.close())
+        except Exception:
+            pass
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+        try:
+            loop.close()
+        except Exception:
+            pass
 
     def _connect(self):
         if self._ws is not None:
@@ -215,10 +232,12 @@ class KfDomAdapter:
         if not focus_ok:
             raise AdapterConfigurationError("客户管家输入框无法获得焦点")
         cdp.insert_text(text)
-        # Vue 只认原生 input 事件同步状态；insertText 改 DOM 不会启用发送按钮。
+        # 本机实测（2026-10-24）：该 Vue 版输入框靠 keyup 同步发送按钮状态，
+        # 只派 input 事件按钮不启用；两个事件都派发才稳定。
         cdp.evaluate(
             "(() => { const el = document.getElementById('edit-content');"
-            " el.dispatchEvent(new Event('input', {bubbles: true})); return true; })()")
+            " el.dispatchEvent(new Event('input', {bubbles: true}));"
+            " el.dispatchEvent(new Event('keyup', {bubbles: true})); return true; })()")
         draft = str(cdp.evaluate(
             "(() => { const el = document.getElementById('edit-content');"
             " return el ? (el.innerText || '') : ''; })()") or "")
