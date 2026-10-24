@@ -36,6 +36,8 @@ class FakeCdp:
                 return True
             return self.draft
         if "send-btn" in expression:
+            if "disabled" in expression:
+                return False
             if self.on_click_send:
                 self.on_click_send()
             return True

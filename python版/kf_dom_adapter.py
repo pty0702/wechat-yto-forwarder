@@ -215,11 +215,19 @@ class KfDomAdapter:
         if not focus_ok:
             raise AdapterConfigurationError("客户管家输入框无法获得焦点")
         cdp.insert_text(text)
+        # Vue 只认原生 input 事件同步状态；insertText 改 DOM 不会启用发送按钮。
+        cdp.evaluate(
+            "(() => { const el = document.getElementById('edit-content');"
+            " el.dispatchEvent(new Event('input', {bubbles: true})); return true; })()")
         draft = str(cdp.evaluate(
             "(() => { const el = document.getElementById('edit-content');"
             " return el ? (el.innerText || '') : ''; })()") or "")
         if _normalized(draft).strip() != _normalized(text).strip():
             raise AdapterConfigurationError("输入结果与原文不同，已保留草稿，未提交发送")
+        if cdp.evaluate(
+                "(() => { const b = document.querySelector('button.send-btn');"
+                " return !b || b.disabled; })()"):
+            raise AdapterConfigurationError("发送按钮未启用，输入未被客户端接受，已保留草稿")
         clicked = cdp.evaluate(
             "(() => { const b = document.querySelector('button.send-btn');"
             " if (!b) return false; b.click(); return true; })()")
