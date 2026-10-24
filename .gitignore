@@ -13,3 +13,4 @@ python版/profiles/local*.json
 # 第三方仓库调研副本（源码已 vendor 到 python版/vendor/）
 references/
 wechatauto_logs/
+HANDOFF.md
