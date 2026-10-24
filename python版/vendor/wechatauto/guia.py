@@ -2592,6 +2592,9 @@ class WeChatGUI:
         self._input.type_unicode(member)
         time.sleep(0.9)
         box = self.get_input_box()
+        # 本项目修改：键入后校验草稿确实进入输入框，否则明确失败，不进入 OCR。
+        if not box or not self._input_box_has_text(box):
+            return WxResponse.failure('键入 @ 昵称后输入框仍为空，未执行发送；请检查窗口焦点')
         popup = (self.right_pane_left, max(80, (box[1] if box else int(self.render_h * 0.49)) - 500),
                  self.render_w, (box[1] if box else int(self.render_h * 0.77)))
         items = self.ocr(popup)
