@@ -2608,12 +2608,17 @@ class WeChatGUI:
                  self.render_w, (box[1] if box else int(self.render_h * 0.77)))
         items = self.ocr(popup)
         target = None
+        # 本项目修改：优先点名称含昵称的候选；没有精确命中就默认点第一个候选，
+        # 只有弹层完全无候选时才失败。
         for t, x, yy, w, h in items:
             if member in t or t.startswith(member):
                 target = rhythm.point((x, yy, x + w, yy + h))
                 break
+        if not target and items:
+            t, x, yy, w, h = items[0]
+            target = rhythm.point((x, yy, x + w, yy + h))
         if not target:
-            return WxResponse.failure(f'未在成员列表中找到：{member}')
+            return WxResponse.failure(f'候选弹层中没有可选项：{member}')
         self.wx_click(self.origin_x + target[0], self.origin_y + target[1])
         time.sleep(0.6)
         if text and not self.input_text(text):
