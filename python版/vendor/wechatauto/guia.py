@@ -1892,6 +1892,19 @@ class WeChatGUI:
                    if sum(px[x, y]) < 450)
         return dark > 20
 
+    def _draft_via_uia(self):
+        """读输入框真实文本；读不到返回 None（探测能力缺失时不得阻断发送）。"""
+        uia = self._get_uia()
+        if uia is None:
+            return None
+        try:
+            ctrl = uia._chat_input()
+            if ctrl is None:
+                return None
+            return uia._read_edit_value(ctrl)
+        except Exception:
+            return None
+
     # ------------------------------------------------------------------
     # 发送
     # ------------------------------------------------------------------
@@ -2591,7 +2604,7 @@ class WeChatGUI:
         if not self.focus_input():
             return WxResponse.failure('输入框不可用')
         # 本项目修改：进入目标会话后先清空输入框残留，避免旧草稿混入本次 @ 消息。
-        # 微信自绘输入框对 Ctrl+A/Delete 偶发不吃，重试两次并稍等焦点稳定。
+        # 校验用 UIA 回读真实文本；像素探测会把光标/边框误判为文字。读不到则放行。
         for clear_try in (1, 2):
             time.sleep(0.25)
             self.focus_input()
@@ -2599,8 +2612,8 @@ class WeChatGUI:
             time.sleep(0.12)
             self._input.key(0x2E)
             time.sleep(0.22)
-            box = self.get_input_box()
-            if not box or not self._input_box_has_text(box):
+            got = self._draft_via_uia()
+            if got is None or not got.strip():
                 break
             if clear_try == 2:
                 return WxResponse.failure('输入框残留草稿清不掉，已停止发送；请手动清理')
@@ -2613,10 +2626,16 @@ class WeChatGUI:
             time.sleep(0.35)
             self._input.type_unicode(member)
             time.sleep(0.55)
-            box = self.get_input_box()
-            if box and self._input_box_has_text(box):
-                typed = True
-                break
+            got = self._draft_via_uia()
+            if got is not None:
+                if member in got or '@' in got:
+                    typed = True
+                    break
+            else:
+                box = self.get_input_box()
+                if box and self._input_box_has_text(box):
+                    typed = True
+                    break
             if attempt == 1:
                 self.calibrate_layout()
                 if not self.focus_input():
