@@ -14,3 +14,9 @@ python版/profiles/local*.json
 references/
 wechatauto_logs/
 HANDOFF.md
+# 打包产物与临时构建（zip 组装在 交付/ 内也忽略体积目录）
+build/
+dist/
+交付/
+smoke_entry.py
+smoke.spec

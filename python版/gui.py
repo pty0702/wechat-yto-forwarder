@@ -8,14 +8,29 @@ from pathlib import Path
 from queue import Empty, Queue
 import threading
 import sys
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from runtime import run_session
 from wechat_forwarder import DEFAULT_CONFIG, CONFIG_FILE, load_config, save_config, validate_config
+import license_client
+import setup_wizard
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+LICENSE_CHECK_INTERVAL = 10 * 60 * 1000   # 运行期每 10 分钟复查一次卡密
+ERROR_LOG = PROJECT_DIR / "logs" / "error.log"
+
+
+def _write_error_log(text: str) -> None:
+    """错误详情落盘：打包版无控制台，弹窗一关就拿不到 traceback。"""
+    try:
+        ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with ERROR_LOG.open("a", encoding="utf-8") as stream:
+            stream.write(f"=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n{text}")
+    except OSError:
+        pass
 
 
 def initialize_dpi():
@@ -393,7 +408,10 @@ class ConfigWindow(tk.Tk):
             try:
                 action()
             except Exception as exc:
-                self._events.put(("error", f"{type(exc).__name__}：{exc}"))
+                detail = f"{type(exc).__name__}：{exc}"
+                _write_error_log(f"[{kind}] {detail}\n"
+                                 + traceback.format_exc() + "\n")
+                self._events.put(("error", detail))
             finally:
                 self._events.put(("finished", ""))
 
@@ -426,6 +444,31 @@ class ConfigWindow(tk.Tk):
             self.var_status.set("正在退出，等待工作线程结束…")
         else:
             self.destroy()
+
+    def begin_license_watch(self, status):
+        """启动运行期卡密复查（离线容错见 license_client.ensure_licensed）。"""
+        expire_text = datetime.fromtimestamp(status.expire_at).strftime("%Y-%m-%d %H:%M") \
+            if status.expire_at else "未知"
+        self._append_log(f"[许可] 卡密有效，到期 {expire_text}"
+                         + ("（当前离线容错）" if status.offline else ""))
+        self.after(LICENSE_CHECK_INTERVAL, self._license_watch)
+
+    def _license_watch(self):
+        status = license_client.ensure_licensed()
+        if status.ok:
+            if status.offline:
+                self._append_log("[许可] 验证服务器不可达，离线容错运行中")
+            self.after(LICENSE_CHECK_INTERVAL, self._license_watch)
+            return
+        self._append_log(f"[许可] 卡密已失效：{status.message}")
+        if self._worker:
+            self._stop_event.set()
+        dialog = ActivationDialog(self, status.message)
+        self.wait_window(dialog)
+        if dialog.granted:
+            self.after(LICENSE_CHECK_INTERVAL, self._license_watch)
+        else:
+            self.on_close()
 
     def _queue_log(self, line):
         # 工作线程只投递队列，不调用 Tk，包括 after()。
@@ -474,5 +517,181 @@ class ConfigWindow(tk.Tk):
         self.txt_log.configure(state="disabled")
 
 
+class ActivationDialog(tk.Toplevel):
+    """卡密激活对话框；模态，wait_window 结束后读 granted / license_key。"""
+
+    def __init__(self, parent, notice=""):
+        super().__init__(parent)
+        self.title("卡密激活 · 微信 ⇄ 圆通客户管家")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.granted = False
+        self.license_key = ""
+        body = ttk.Frame(self, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="首次使用请输入卡密激活；每张卡密绑定一台设备。",
+                  wraplength=420).pack(anchor="w", pady=(0, 10))
+        self.var_key = tk.StringVar()
+        entry = ttk.Entry(body, textvariable=self.var_key, width=44)
+        entry.pack(fill="x", pady=(0, 8))
+        entry.focus_set()
+        self.var_status = tk.StringVar(value=notice or "请输入卡密后点击「激活」")
+        ttk.Label(body, textvariable=self.var_status, wraplength=420,
+                  foreground="#7a5c00").pack(anchor="w", pady=(0, 12))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="退出", command=self.destroy).pack(side="left")
+        ttk.Button(buttons, text="激活", command=self.on_activate).pack(side="right")
+        self.bind("<Return>", lambda _event: self.on_activate())
+        self.update_idletasks()
+        x = max(0, parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2)
+        y = max(0, parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+
+    def on_activate(self):
+        key = self.var_key.get().strip()
+        if not key:
+            self.var_status.set("请先输入卡密")
+            return
+        self.var_status.set("正在激活…")
+        self.update_idletasks()
+        status = license_client.activate(key)
+        if status.ok:
+            self.granted = True
+            self.license_key = key
+            self.destroy()
+            return
+        self.var_status.set(status.message or "激活失败，请核对卡密")
+
+
+def _license_notice(status):
+    """无有效许可时的提示语；首次使用不显示吓人的错误。"""
+    if status.message == "未找到已激活的卡密":
+        return ""
+    return status.message
+
+
+class SetupWizard(tk.Toplevel):
+    """首次运行向导：环境检测 → 填群名/昵称 → 生成配置。模态。"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("首次运行向导 · 微信 ⇄ 圆通客户管家")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.completed = False
+        self.body = ttk.Frame(self, padding=20)
+        self.body.pack(fill="both", expand=True)
+        self._show_check_page()
+        self.update_idletasks()
+        x = max(0, parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2)
+        y = max(0, parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+
+    def _clear(self):
+        for child in self.body.winfo_children():
+            child.destroy()
+
+    def _show_check_page(self):
+        self._clear()
+        ttk.Label(self.body, text="第 1 步 · 环境检测", font=("", 12, "bold")).pack(anchor="w")
+        ttk.Label(self.body, text="请先满足以下两个条件，再点击「重新检测」：\n"
+                                  "1. 微信已登录并在运行；\n"
+                                  "2. 客户管家用本包附带的「启动客户管家」脚本启动（普通双击启动无法对接）。",
+                  wraplength=460, justify="left").pack(anchor="w", pady=(6, 10))
+        self.var_wx = tk.StringVar(value="检测中…")
+        self.var_cdp = tk.StringVar(value="检测中…")
+        ttk.Label(self.body, textvariable=self.var_wx).pack(anchor="w", pady=2)
+        ttk.Label(self.body, textvariable=self.var_cdp).pack(anchor="w", pady=2)
+        buttons = ttk.Frame(self.body)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="重新检测", command=self._run_checks).pack(side="right")
+        self.after(100, self._run_checks)
+
+    def _run_checks(self):
+        wx_ok = setup_wizard.detect_wechat_running()
+        cdp_ok = setup_wizard.detect_cdp()
+        self.var_wx.set(("✓ 微信正在运行" if wx_ok else "✗ 未检测到微信，请先登录微信"))
+        self.var_cdp.set(("✓ 客户管家调试口已就绪" if cdp_ok
+                          else "✗ 客户管家调试口未就绪，请用附带脚本启动客户管家"))
+        if wx_ok and cdp_ok:
+            self.after(400, self._show_form_page)
+
+    def _show_form_page(self):
+        self._clear()
+        ttk.Label(self.body, text="第 2 步 · 填写群与昵称", font=("", 12, "bold")).pack(anchor="w")
+        auto_name = setup_wizard.read_wechat_self_name()
+        rows = [
+            ("微信群名称（客户发单的群）", "var_wx_group", ""),
+            ("客户管家群名称（客服群）", "var_kf_group", ""),
+            ("微信客服昵称（@提醒对象）", "var_staff", ""),
+            ("机器人昵称（默认小圆-总公司）", "var_bot", "小圆-总公司"),
+            ("你在客户管家里的显示名", "var_kf_self", ""),
+            ("你在微信群里的昵称", "var_wx_self", auto_name),
+        ]
+        self._vars = {}
+        for label, attr, default in rows:
+            row = ttk.Frame(self.body)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=label, width=26).pack(side="left")
+            var = tk.StringVar(value=default)
+            self._vars[attr] = var
+            ttk.Entry(row, textvariable=var, width=28).pack(side="left", fill="x", expand=True)
+        ttk.Label(self.body, text="「客户管家显示名」查看方法：在客服群里随便发一条消息，"
+                                  "消息上方显示的名字就是。填错会导致收不到自己发出的回复确认。",
+                  wraplength=460, foreground="#7a5c00", justify="left").pack(anchor="w", pady=(8, 0))
+        self.var_msg = tk.StringVar()
+        ttk.Label(self.body, textvariable=self.var_msg, wraplength=460,
+                  foreground="#c02020").pack(anchor="w", pady=(4, 0))
+        buttons = ttk.Frame(self.body)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="跳过（稍后在主窗口配置）", command=self.destroy).pack(side="left")
+        ttk.Button(buttons, text="生成配置", command=self.on_generate).pack(side="right")
+
+    def on_generate(self):
+        values = {key: var.get().strip() for key, var in self._vars.items()}
+        missing = [label for label, key in [
+            ("微信群名称", "var_wx_group"), ("客户管家群名称", "var_kf_group"),
+            ("微信客服昵称", "var_staff"), ("客户管家显示名", "var_kf_self"),
+            ("微信昵称", "var_wx_self")] if not values[key]]
+        if missing:
+            self.var_msg.set("请填写：" + "、".join(missing))
+            return
+        try:
+            setup_wizard.write_setup(
+                values["var_wx_group"], values["var_kf_group"],
+                values["var_staff"], values["var_bot"] or "小圆-总公司",
+                values["var_wx_self"], [values["var_kf_self"]])
+        except OSError as exc:
+            self.var_msg.set(f"写入配置失败：{exc}")
+            return
+        self.completed = True
+        self.destroy()
+
+
+def main():
+    app = ConfigWindow()
+    if setup_wizard.setup_needed():
+        wizard = SetupWizard(app)
+        app.wait_window(wizard)
+        if wizard.completed:
+            app._load_config()
+            app._fill_form()
+            app._append_log("[向导] 首次配置已生成，建议先点「双端检查」验证。")
+            app.var_status.set("首次配置完成，请先双端检查")
+    status = license_client.ensure_licensed()
+    if not status.ok:
+        dialog = ActivationDialog(app, _license_notice(status))
+        app.wait_window(dialog)
+        if not dialog.granted:
+            app.destroy()
+            return
+        status = license_client.ensure_licensed()
+    app.begin_license_watch(status)
+    app.mainloop()
+
+
 if __name__ == "__main__":
-    ConfigWindow().mainloop()
+    main()
