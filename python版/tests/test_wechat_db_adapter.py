@@ -55,6 +55,12 @@ class FakeGui:
             self.on_send(f"@{member} {text}")
         return self.response
 
+    def at_members(self, members, text, who=None, verify=False):
+        self.calls.append(("at", who, list(members), text, verify))
+        if self.on_send:
+            self.on_send("".join(f"@{m} " for m in members) + text)
+        return self.response
+
 
 def row(seq, sender, content, kind="文本", local_id=1):
     return {
@@ -133,7 +139,7 @@ class WechatDbAdapterTests(unittest.TestCase):
     def test_send_mention_delegates_at_member(self):
         self.client.prepare()
         self.client.send_mention("圆通快递", "请跟进")
-        self.assertEqual(self.gui.calls, [("at", "潼阳圆通出港群", "圆通快递", "请跟进", False)])
+        self.assertEqual(self.gui.calls, [("at", "潼阳圆通出港群", ["圆通快递"], "请跟进", False)])
 
     def test_send_failure_or_exception_is_uncertain(self):
         self.client.prepare()

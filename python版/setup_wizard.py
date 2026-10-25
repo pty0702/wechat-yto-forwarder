@@ -65,17 +65,23 @@ def build_profile(wx_self_name: str, kf_self_names: list[str],
     }
 
 
-def write_setup(wx_group: str, kf_group: str, service_staff: str, bot_name: str,
+def write_setup(wx_groups, kf_group: str, service_staff: str, bot_name: str,
                 wx_self_name: str, kf_self_names: list[str],
                 cdp_url: str = DEFAULT_CDP) -> Path:
-    """写入 profile 与 config；返回 profile 路径。"""
+    """写入 profile 与 config；wx_groups 为群名列表（至少一个）。返回 profile 路径。"""
+    if isinstance(wx_groups, str):
+        wx_groups = [wx_groups]
+    wx_groups = [g.strip() for g in wx_groups if str(g).strip()]
     profile = build_profile(wx_self_name, kf_self_names, cdp_url)
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     profile_path = PROFILE_DIR / "wizard.generated.json"
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n",
                             encoding="utf-8")
     config = {
-        "wx_group": wx_group, "kf_group": kf_group,
+        "wx_group": wx_groups[0] if wx_groups else "",
+        "wx_groups": wx_groups,
+        "group_policies": {},
+        "kf_group": kf_group,
         "block_keywords": [], "at_keywords": [],
         "service_staff": service_staff, "bot_name": bot_name,
         "poll_interval": 3.0, "reset_seconds": 30.0,

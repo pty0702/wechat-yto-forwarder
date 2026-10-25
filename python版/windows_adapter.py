@@ -537,7 +537,8 @@ def create_live_adapters(cfg, log=print, need=None):
         if "wx" in need and profile["wx"].get("parser") == "wechat_db":
             # 读走微信本地库、发走坐标/OCR：不绑定 UIA 窗口，也不需要无障碍兼容。
             from wechat_db_adapter import WechatDbAdapter
-            wx = WechatDbAdapter(profile["wx"], cfg["wx_group"], log)
+            groups = cfg.get("wx_groups") or [cfg["wx_group"]]
+            wx = WechatDbAdapter(profile["wx"], groups, log)
             wx.prepare()
         elif "wx" in need:
             wx_window = select(auto.GetRootControl(), profile["wx"]["window"], "微信窗口")

@@ -122,48 +122,58 @@ class ConfigWindow(tk.Tk):
         self._configuration_widgets.append((modes, "readonly"))
         ttk.Label(config, text="演示使用独立样例，不依赖群名和真实客户端；下方设置仅用于保存和真实运行。",
                   foreground="#586174").grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        # 多群：一行一个微信群名；var_wx 保留旧字段兼容（保存时取首个）。
+        ttk.Label(config, text="微信群列表（一行一群）").grid(row=2, column=0, sticky="nw", padx=(0, 12), pady=5)
+        self.txt_wx_groups = tk.Text(config, height=3, width=34, wrap="none", undo=True)
+        self.txt_wx_groups.grid(row=2, column=1, sticky="ew", pady=5)
+        self._configuration_widgets.append((self.txt_wx_groups, "normal"))
         fields = [
-            ("微信群名", self.var_wx), ("客户管家群名", self.var_kf),
-            ("被 @ 的客服名", self.var_staff), ("机器人发送者名称", self.var_bot),
+            ("客户管家群名", self.var_kf),
+            ("被 @ 的客服名（多人用顿号分隔）", self.var_staff),
+            ("机器人发送者名称", self.var_bot),
         ]
-        for row, (label, variable) in enumerate(fields, start=2):
+        for row, (label, variable) in enumerate(fields, start=3):
             self._entry_row(config, row, label, variable)
-        self._entry_row(config, 6, "适配配置 JSON", self.var_profile)
+        self._entry_row(config, 7, "适配配置 JSON", self.var_profile)
         browse = ttk.Button(config, text="选择文件…", command=self._choose_profile)
-        browse.grid(row=6, column=2, padx=(8, 0))
+        browse.grid(row=7, column=2, padx=(8, 0))
         self._configuration_widgets.append((browse, "normal"))
         ttk.Label(config, text="真实运行需使用与当前客户端版本匹配的控件配置；先读取窗口诊断，再按说明填写。",
-                  foreground="#586174").grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
+                  foreground="#586174").grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
         compatibility = ttk.Checkbutton(
             config, text="微信4兼容（实验性，停止后恢复）", variable=self.var_wechat_accessibility,
         )
-        compatibility.grid(row=8, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        compatibility.grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 4))
         self._configuration_widgets.append((compatibility, "normal"))
         ttk.Label(
             config, text="仅对已验证的固定微信版本临时启用控件；诊断结束或停止时恢复。演示不使用此选项。",
             foreground="#586174",
-        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(0, 6))
         timing = ttk.Frame(config)
-        timing.grid(row=10, column=0, columnspan=3, sticky="ew", pady=4)
+        timing.grid(row=11, column=0, columnspan=3, sticky="ew", pady=4)
         for label, variable in (("轮询间隔（秒）", self.var_poll), ("无回复超时（秒）", self.var_timeout)):
             ttk.Label(timing, text=label).pack(side="left", padx=(0, 8))
             entry = ttk.Entry(timing, textvariable=variable, width=9)
             entry.pack(side="left", padx=(0, 24))
             self._configuration_widgets.append((entry, "normal"))
         keywords = ttk.Frame(config)
-        keywords.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(10, 4))
-        config.rowconfigure(11, weight=1)
-        keywords.columnconfigure((0, 1), weight=1)
+        keywords.grid(row=12, column=0, columnspan=3, sticky="nsew", pady=(10, 4))
+        config.rowconfigure(12, weight=1)
+        keywords.columnconfigure((0, 1, 2), weight=1)
         keywords.rowconfigure(1, weight=1)
-        ttk.Label(keywords, text="屏蔽词（一行一个，命中即忽略）").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        ttk.Label(keywords, text="@ 客服词句（一行一个，命中则提醒客服）").grid(row=0, column=1, sticky="w", pady=(0, 4), padx=(12, 0))
-        self.txt_block = tk.Text(keywords, height=7, width=30, wrap="word", undo=True)
-        self.txt_at = tk.Text(keywords, height=7, width=30, wrap="word", undo=True)
+        ttk.Label(keywords, text="屏蔽词（全局，一行一个）").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(keywords, text="@ 客服词句（全局，一行一个）").grid(row=0, column=1, sticky="w", pady=(0, 4), padx=(12, 0))
+        ttk.Label(keywords, text="按群覆盖（群名|屏蔽词,词|@词,词）").grid(row=0, column=2, sticky="w", pady=(0, 4), padx=(12, 0))
+        self.txt_block = tk.Text(keywords, height=7, width=26, wrap="word", undo=True)
+        self.txt_at = tk.Text(keywords, height=7, width=26, wrap="word", undo=True)
+        self.txt_policies = tk.Text(keywords, height=7, width=30, wrap="none", undo=True)
         self.txt_block.grid(row=1, column=0, sticky="nsew")
         self.txt_at.grid(row=1, column=1, sticky="nsew", padx=(12, 0))
-        self._configuration_widgets.extend([(self.txt_block, "normal"), (self.txt_at, "normal")])
+        self.txt_policies.grid(row=1, column=2, sticky="nsew", padx=(12, 0))
+        self._configuration_widgets.extend([
+            (self.txt_block, "normal"), (self.txt_at, "normal"), (self.txt_policies, "normal")])
         send_check = ttk.Button(config, text="单次发送验收…", command=self.on_send_check)
-        send_check.grid(row=12, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        send_check.grid(row=13, column=0, columnspan=3, sticky="e", pady=(8, 0))
         self._configuration_widgets.append((send_check, "normal"))
 
         logs.columnconfigure(0, weight=1)
@@ -201,8 +211,12 @@ class ConfigWindow(tk.Tk):
         self._configuration_widgets.append((entry, "normal"))
 
     def _fill_form(self):
+        groups = self.cfg.get("wx_groups") or (
+            [self.cfg["wx_group"]] if self.cfg.get("wx_group") else [])
+        self.txt_wx_groups.delete("1.0", "end")
+        self.txt_wx_groups.insert("1.0", "\n".join(groups))
         for variable, key, default in (
-            (self.var_wx, "wx_group", ""), (self.var_kf, "kf_group", ""),
+            (self.var_kf, "kf_group", ""),
             (self.var_staff, "service_staff", ""), (self.var_bot, "bot_name", "小圆-总公司"),
             (self.var_profile, "adapter_profile", ""), (self.var_poll, "poll_interval", 3),
             (self.var_timeout, "reset_seconds", 30),
@@ -212,10 +226,38 @@ class ConfigWindow(tk.Tk):
         for widget, key in ((self.txt_block, "block_keywords"), (self.txt_at, "at_keywords")):
             widget.delete("1.0", "end")
             widget.insert("1.0", "\n".join(self.cfg.get(key, [])))
+        policies = self.cfg.get("group_policies", {})
+        lines = []
+        for group, policy in policies.items():
+            block = ",".join(policy.get("block_keywords", []))
+            at = ",".join(policy.get("at_keywords", []))
+            lines.append(f"{group}|{block}|{at}")
+        self.txt_policies.delete("1.0", "end")
+        self.txt_policies.insert("1.0", "\n".join(lines))
 
     @staticmethod
     def _lines(widget):
         return [line.strip() for line in widget.get("1.0", "end").splitlines() if line.strip()]
+
+    @staticmethod
+    def _parse_policies(lines, known_groups):
+        """解析「群名|屏蔽词,词|@词,词」行；群名必须在群列表内。"""
+        policies = {}
+        for line in lines:
+            parts = [p.strip() for p in line.split("|")]
+            if not parts or not parts[0]:
+                continue
+            group = parts[0]
+            if group not in known_groups:
+                raise ValueError(f"按群覆盖里的群「{group}」不在微信群列表内")
+            policy = {}
+            if len(parts) > 1 and parts[1]:
+                policy["block_keywords"] = [w for w in parts[1].split(",") if w.strip()]
+            if len(parts) > 2 and parts[2]:
+                policy["at_keywords"] = [w for w in parts[2].split(",") if w.strip()]
+            if policy:
+                policies[group] = policy
+        return policies
 
     def _collect(self, live=False):
         cfg = copy.deepcopy(self.cfg)
@@ -228,9 +270,14 @@ class ConfigWindow(tk.Tk):
         if profile:
             path = Path(profile).expanduser()
             profile = str((PROJECT_DIR / path).resolve() if not path.is_absolute() else path.resolve())
+        groups = self._lines(self.txt_wx_groups)
+        policies = self._parse_policies(self._lines(self.txt_policies), set(groups))
         cfg.update({
             "mode": "live" if self.var_mode.get() == "真实客户端" else "demo",
-            "wx_group": self.var_wx.get().strip(), "kf_group": self.var_kf.get().strip(),
+            "wx_group": groups[0] if groups else "",
+            "wx_groups": groups,
+            "group_policies": policies,
+            "kf_group": self.var_kf.get().strip(),
             "service_staff": self.var_staff.get().strip(), "bot_name": self.var_bot.get().strip(),
             "block_keywords": self._lines(self.txt_block), "at_keywords": self._lines(self.txt_at),
             "adapter_profile": profile, "poll_interval": poll, "reset_seconds": timeout,
@@ -623,22 +670,28 @@ class SetupWizard(tk.Toplevel):
         self._clear()
         ttk.Label(self.body, text="第 2 步 · 填写群与昵称", font=("", 12, "bold")).pack(anchor="w")
         auto_name = setup_wizard.read_wechat_self_name()
+        ttk.Label(self.body, text="微信群列表（一行一个群，可填多个）").pack(anchor="w", pady=(6, 2))
+        self.txt_groups = tk.Text(self.body, height=3, width=46, undo=True)
+        self.txt_groups.pack(fill="x")
+        self._vars = {
+            "var_kf_group": tk.StringVar(),
+            "var_staff": tk.StringVar(),
+            "var_bot": tk.StringVar(value="小圆-总公司"),
+            "var_kf_self": tk.StringVar(),
+            "var_wx_self": tk.StringVar(value=auto_name),
+        }
         rows = [
-            ("微信群名称（客户发单的群）", "var_wx_group", ""),
-            ("客户管家群名称（客服群）", "var_kf_group", ""),
-            ("微信客服昵称（@提醒对象）", "var_staff", ""),
-            ("机器人昵称（默认小圆-总公司）", "var_bot", "小圆-总公司"),
-            ("你在客户管家里的显示名", "var_kf_self", ""),
-            ("你在微信群里的昵称", "var_wx_self", auto_name),
+            ("客户管家群名称（客服群）", "var_kf_group"),
+            ("微信客服昵称（@提醒对象，多人用顿号分隔）", "var_staff"),
+            ("机器人昵称", "var_bot"),
+            ("你在客户管家里的显示名", "var_kf_self"),
+            ("你在微信群里的昵称", "var_wx_self"),
         ]
-        self._vars = {}
-        for label, attr, default in rows:
+        for label, attr in rows:
             row = ttk.Frame(self.body)
             row.pack(fill="x", pady=3)
-            ttk.Label(row, text=label, width=26).pack(side="left")
-            var = tk.StringVar(value=default)
-            self._vars[attr] = var
-            ttk.Entry(row, textvariable=var, width=28).pack(side="left", fill="x", expand=True)
+            ttk.Label(row, text=label, width=28).pack(side="left")
+            ttk.Entry(row, textvariable=self._vars[attr], width=28).pack(side="left", fill="x", expand=True)
         ttk.Label(self.body, text="「客户管家显示名」查看方法：在客服群里随便发一条消息，"
                                   "消息上方显示的名字就是。填错会导致收不到自己发出的回复确认。",
                   wraplength=460, foreground="#7a5c00", justify="left").pack(anchor="w", pady=(8, 0))
@@ -652,16 +705,18 @@ class SetupWizard(tk.Toplevel):
 
     def on_generate(self):
         values = {key: var.get().strip() for key, var in self._vars.items()}
-        missing = [label for label, key in [
-            ("微信群名称", "var_wx_group"), ("客户管家群名称", "var_kf_group"),
-            ("微信客服昵称", "var_staff"), ("客户管家显示名", "var_kf_self"),
-            ("微信昵称", "var_wx_self")] if not values[key]]
+        groups = [line.strip() for line in
+                  self.txt_groups.get("1.0", "end").splitlines() if line.strip()]
+        missing = [label for label, value in [
+            ("微信群列表", "\n".join(groups)), ("客户管家群名称", values["var_kf_group"]),
+            ("微信客服昵称", values["var_staff"]), ("客户管家显示名", values["var_kf_self"]),
+            ("微信昵称", values["var_wx_self"])] if not value]
         if missing:
             self.var_msg.set("请填写：" + "、".join(missing))
             return
         try:
             setup_wizard.write_setup(
-                values["var_wx_group"], values["var_kf_group"],
+                groups, values["var_kf_group"],
                 values["var_staff"], values["var_bot"] or "小圆-总公司",
                 values["var_wx_self"], [values["var_kf_self"]])
         except OSError as exc:

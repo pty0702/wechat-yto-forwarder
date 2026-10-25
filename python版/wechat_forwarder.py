@@ -42,11 +42,13 @@ from typing import Callable, Dict, List, Optional
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
-    "wx_group": "",       # 微信监控群名，如：潼阳圆通出港群
+    "wx_group": "",       # 单群写法（兼容旧配置）；新配置用 wx_groups
+    "wx_groups": [],      # 微信监控群列表，如：["潼阳圆通出港群", "潼阳圆通进港群"]
     "kf_group": "",       # 客户管家客服群名，如：潼阳-张士祥客户服务群
-    "block_keywords": [],  # 屏蔽词：YT 消息命中即忽略
-    "at_keywords": [],     # @客服词句：YT 消息命中即 @客服
-    "service_staff": "",   # 客服名：@ 时 @ 的人，后期自己填
+    "block_keywords": [],  # 屏蔽词（全局默认）：YT 消息命中即忽略
+    "at_keywords": [],     # @客服词句（全局默认）：YT 消息命中即 @客服
+    "group_policies": {},  # 按群覆盖：{"群名": {"block_keywords": [], "at_keywords": []}}
+    "service_staff": "",   # 客服名：多人用顿号/逗号分隔，@ 时一条消息全部提醒
     "bot_name": "小圆-总公司",  # 必须与机器人显示的完整名称一致
     "poll_interval": 3,    # 轮询间隔（秒）
     "reset_seconds": 30,   # 转发后 30 秒未等到小圆回复 → 重置该条等待
@@ -55,6 +57,14 @@ DEFAULT_CONFIG = {
     "wx_profile": {},
     "kf_profile": {},
 }
+
+
+def split_staff(staff: str) -> List[str]:
+    """客服名单拆分：顿号/英文逗号/中文逗号/分号分隔，去空去重保序。"""
+    if not isinstance(staff, str):
+        return []
+    parts = re.split(r"[、，,；;]", staff)
+    return list(dict.fromkeys(p.strip() for p in parts if p.strip()))
 
 
 def validate_config(cfg: dict, live: bool = False) -> dict:
@@ -74,6 +84,39 @@ def validate_config(cfg: dict, live: bool = False) -> dict:
         raise ValueError("微信兼容开关必须是布尔值 true 或 false")
     if not normalized["bot_name"]:
         raise ValueError("机器人完整名称不能为空")
+    # 群列表：wx_groups 优先；旧单群 wx_group 自动并入；两者并存时合并去重。
+    groups_value = normalized.get("wx_groups", [])
+    if isinstance(groups_value, str):
+        groups_value = [groups_value]
+    if not isinstance(groups_value, list) or any(
+            not isinstance(g, str) or not g.strip() for g in groups_value):
+        raise ValueError("配置项 wx_groups 必须是非空群名字符串列表")
+    groups = list(dict.fromkeys(g.strip() for g in groups_value if g.strip()))
+    if normalized["wx_group"]:
+        groups = list(dict.fromkeys([normalized["wx_group"]] + groups))
+    normalized["wx_groups"] = groups
+    normalized["wx_group"] = groups[0] if groups else ""
+    # 按群词表覆盖：只允许覆盖 block_keywords / at_keywords，群名必须在列表内。
+    policies = normalized.get("group_policies", {})
+    if not isinstance(policies, dict):
+        raise ValueError("配置项 group_policies 必须是对象")
+    clean_policies = {}
+    for group, policy in policies.items():
+        if group not in groups:
+            raise ValueError(f"group_policies 里的群不在 wx_groups 列表内：{group}")
+        if not isinstance(policy, dict):
+            raise ValueError(f"group_policies[{group}] 必须是对象")
+        clean = {}
+        for key in ("block_keywords", "at_keywords"):
+            words = policy.get(key)
+            if words is None:
+                continue
+            if not isinstance(words, list) or any(not isinstance(w, str) for w in words):
+                raise ValueError(f"group_policies[{group}].{key} 必须是字符串列表")
+            clean[key] = list(dict.fromkeys(w.strip() for w in words if w.strip()))
+        if clean:
+            clean_policies[group] = clean
+    normalized["group_policies"] = clean_policies
     for key in ("block_keywords", "at_keywords"):
         value = normalized[key]
         if not isinstance(value, list) or any(not isinstance(word, str) for word in value):
@@ -94,7 +137,7 @@ def validate_config(cfg: dict, live: bool = False) -> dict:
         if not isinstance(normalized[key], dict):
             raise ValueError(f"配置项 {key} 必须是对象")
     if live:
-        if not normalized["wx_group"] or not normalized["kf_group"]:
+        if not normalized["wx_groups"] or not normalized["kf_group"]:
             raise ValueError("真实运行前必须填写微信群名和客户管家客服群名")
         if normalized["at_keywords"] and not normalized["service_staff"]:
             raise ValueError("配置了 @客服词句时，必须填写客服完整名称")
@@ -146,6 +189,7 @@ class Message:
     message_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     is_self: bool = False
     kind: str = "text"
+    group: str = ""   # 消息来源群名：多群模式下用于按群词表判定与回复路由
 
     def __post_init__(self):
         if not isinstance(self.message_id, str) or not self.message_id:
@@ -192,14 +236,21 @@ def _is_media(text: str) -> bool:
 
 
 def classify(msg: Message, cfg: dict) -> Verdict:
-    """方向① 的核心判定：按 屏蔽词 → @客服词 → 正常转发 的顺序。"""
+    """方向① 的核心判定：按 屏蔽词 → @客服词 → 正常转发 的顺序。
+
+    多群模式下优先用 group_policies[msg.group] 覆盖的词表，未覆盖的群
+    用全局 block_keywords / at_keywords。
+    """
     if msg.is_self or msg.kind != "text" or _is_media(msg.content):
         return Verdict.IGNORE
     if not starts_with_waybill(msg.content):
         return Verdict.IGNORE          # 不带 YT 开头：图片、闲聊等一律忽略
-    if hit_any(msg.content, cfg.get("block_keywords", [])):
+    policy = cfg.get("group_policies", {}).get(msg.group) or {}
+    block_words = policy.get("block_keywords", cfg.get("block_keywords", []))
+    at_words = policy.get("at_keywords", cfg.get("at_keywords", []))
+    if hit_any(msg.content, block_words):
         return Verdict.IGNORE          # 命中屏蔽词：装作没看见
-    if hit_any(msg.content, cfg.get("at_keywords", [])):
+    if hit_any(msg.content, at_words):
         return Verdict.AT_SERVICE      # 命中 @客服词句：微信群 @客服
     return Verdict.FORWARD             # 正常转发客户管家
 
@@ -213,16 +264,21 @@ class PendingQueue:
 
     def __init__(self, reset_seconds: float):
         self.reset_seconds = reset_seconds
-        self._items: Dict[str, float] = {}   # 运单号 -> 转发时间戳（插入顺序即先进先出）
+        self._items: Dict[str, tuple] = {}   # 运单号 -> (转发时间戳, 来源群名)
 
-    def add(self, waybill: str) -> None:
-        self._items[waybill] = time.monotonic()
+    def add(self, waybill: str, group: str = "") -> None:
+        self._items[waybill] = (time.monotonic(), group)
+
+    def group_of(self, waybill: str) -> str:
+        """该运单号的请求来自哪个微信群（搬回路由用）。"""
+        item = self._items.get(waybill)
+        return item[1] if item else ""
 
     def refresh(self, waybill: str) -> None:
         """搬回一条回复后刷新等待计时：小圆对同一单连发多条也能全部搬回，
         30 秒无新回复才算这轮对话结束。"""
         if waybill in self._items:
-            self._items[waybill] = time.monotonic()
+            self._items[waybill] = (time.monotonic(), self._items[waybill][1])
 
     def __contains__(self, waybill: str) -> bool:
         return waybill in self._items
@@ -237,7 +293,7 @@ class PendingQueue:
     def sweep(self) -> List[str]:
         """返回超时应重置的运单号并移出队列。"""
         now = time.monotonic()
-        expired = [wb for wb, ts in self._items.items()
+        expired = [wb for wb, (ts, _group) in self._items.items()
                    if now - ts >= self.reset_seconds]
         for wb in expired:
             del self._items[wb]
@@ -267,11 +323,11 @@ class WxSource:
 
 
 class WxSink:
-    """微信群发送：粘贴到输入框并回车。"""
-    def send(self, text: str) -> None:
+    """微信群发送：粘贴到输入框并回车。group 指定发到哪个群（多群模式）。"""
+    def send(self, text: str, group: str = "") -> None:
         raise NotImplementedError
 
-    def send_mention(self, staff: str, text: str) -> None:
+    def send_mention(self, staff: str, text: str, group: str = "") -> None:
         """选择真实群成员提及后发送，不能仅拼接普通的 @ 文本。"""
         raise NotImplementedError
 
@@ -353,16 +409,18 @@ class Forwarder:
         while self._wx_buffer:
             message_id, msg = next(iter(self._wx_buffer.items()))
             verdict = classify(msg, self.cfg)
+            target_group = msg.group or self.cfg["wx_group"]
             if verdict is Verdict.AT_SERVICE:
                 staff = self.cfg["service_staff"]
                 if not staff:
                     raise ValueError("命中 @客服词句，但客服完整名称未配置；消息保留待处理")
-                self._send(self.wx_snk.send_mention, staff, msg.content)
-                notice = f"[艾特客服] 已在微信群 @{staff}：{msg.content[:40]}"
+                self._send(self.wx_snk.send_mention, staff, msg.content, target_group)
+                notice = (f"[艾特客服] 已在 {target_group} @{staff}：{msg.content[:40]}")
             elif verdict is Verdict.FORWARD:
                 self._send(self.kf_snk.send, msg.content)
-                self.queue.add(extract_waybill(msg.content))
-                notice = f"[转发] → 客户管家 {self.cfg['kf_group']}：{msg.content[:40]}"
+                self.queue.add(extract_waybill(msg.content), target_group)
+                notice = (f"[转发] {target_group} → 客户管家 "
+                          f"{self.cfg['kf_group']}：{msg.content[:40]}")
             else:
                 notice = None
             # 只在发送明确成功或规则明确忽略后确认事件。
@@ -383,11 +441,13 @@ class Forwarder:
     def _flush_kf(self) -> None:
         while self._kf_buffer:
             message_id, (reply, waybill) = next(iter(self._kf_buffer.items()))
-            self._send(self.wx_snk.send, reply.content)
+            # 回复按运单号路由回原微信群；查不到来源（旧配置/异常）发默认群。
+            target_group = self.queue.group_of(waybill) or self.cfg["wx_group"]
+            self._send(self.wx_snk.send, reply.content, target_group)
             self.queue.refresh(waybill)
             self._seen_kf.add(message_id)
             del self._kf_buffer[message_id]
-            self.log(f"[搬回] ← {reply.sender}：{reply.content[:40]}")
+            self.log(f"[搬回] ← {reply.sender} → {target_group}：{reply.content[:40]}")
 
     def poll_kf(self) -> None:
         """先清超时，再关联本批回复；已及时收到的回复发送失败后仍可重试。"""
@@ -430,7 +490,8 @@ class Forwarder:
         event = stop_event if stop_event is not None else threading.Event()
         self._stop_event = event
         interval = self.cfg["poll_interval"]
-        self.log(f"开始运行：微信[{self.cfg['wx_group']}] ⇄ 客户管家[{self.cfg['kf_group']}]，每 {interval:g} 秒轮询")
+        groups_text = "、".join(self.cfg.get("wx_groups") or [self.cfg["wx_group"]])
+        self.log(f"开始运行：微信[{groups_text}] ⇄ 客户管家[{self.cfg['kf_group']}]，每 {interval:g} 秒轮询")
         try:
             while not event.is_set():
                 try:
@@ -480,10 +541,10 @@ class MockWxSink(WxSink):
     def __init__(self, store: List[str]):
         self.store = store
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, group: str = "") -> None:
         self.store.append(text)
 
-    def send_mention(self, staff: str, text: str) -> None:
+    def send_mention(self, staff: str, text: str, group: str = "") -> None:
         # 内存演示只记录可读文本，真实适配器需要选择群成员完成提及。
         self.store.append(f"@{staff} {text}")
 

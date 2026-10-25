@@ -76,10 +76,10 @@ class ForwarderTests(unittest.TestCase):
         calls = []
 
         class MentionSink(core.WxSink):
-            def send(self, text):
+            def send(self, text, group=""):
                 raise AssertionError("提及不能通过普通文本发送接口")
 
-            def send_mention(self, staff, text):
+            def send_mention(self, staff, text, group=""):
                 calls.append((staff, text))
 
         self.forwarder.wx_snk = MentionSink()
@@ -94,7 +94,7 @@ class ForwarderTests(unittest.TestCase):
         failures = [False, True, False, False]
 
         class FlakySink(core.KfSink):
-            def send(self, text):
+            def send(self, text, group=""):
                 if failures.pop(0):
                     raise core.RetryableSendError("发送前窗口暂时不可用")
                 calls.append(text)
@@ -114,7 +114,7 @@ class ForwarderTests(unittest.TestCase):
         delivered = []
 
         class FlakySink(core.WxSink):
-            def send(self, text):
+            def send(self, text, group=""):
                 if failures.pop(0):
                     raise core.RetryableSendError("确认尚未发出")
                 delivered.append(text)
@@ -127,7 +127,7 @@ class ForwarderTests(unittest.TestCase):
             self.kf.inbox = replies
             with self.assertRaises(core.RetryableSendError):
                 self.forwarder.poll_kf()
-            self.assertEqual(self.forwarder.queue._items[WB1], 100.0)
+            self.assertEqual(self.forwarder.queue._items[WB1][0], 100.0)
             self.assertNotIn(replies[0].message_id, self.forwarder._seen_kf)
             now[0] = 140.0
             self.forwarder.poll_kf()
@@ -177,8 +177,8 @@ class ForwarderTests(unittest.TestCase):
             now[0] = 120.0
             self.kf.inbox = [core.Message("小圆", "正在处理")]
             self.forwarder.poll_kf()
-        self.assertEqual(self.forwarder.queue._items[WB1], 120.0)
-        self.assertEqual(self.forwarder.queue._items[WB2], 110.0)
+        self.assertEqual(self.forwarder.queue._items[WB1][0], 120.0)
+        self.assertEqual(self.forwarder.queue._items[WB2][0], 110.0)
         self.assertEqual(self.sent_wx, ["正在处理"])
 
     def test_core_checks_bot_exact_name_and_filters_self_and_media(self):
@@ -209,7 +209,7 @@ class ForwarderTests(unittest.TestCase):
         sent = []
 
         class UncertainSink(core.KfSink):
-            def send(self, text):
+            def send(self, text, group=""):
                 sent.append(text)
                 raise core.SendUncertainError("已按发送，但回执未确认")
 
@@ -226,7 +226,7 @@ class ForwarderTests(unittest.TestCase):
 
     def test_unclassified_send_exception_is_not_assumed_safe_to_retry(self):
         class UnknownSink(core.KfSink):
-            def send(self, text):
+            def send(self, text, group=""):
                 raise OSError("发送过程中窗口关闭")
 
         self.forwarder.kf_snk = UnknownSink()
@@ -239,7 +239,7 @@ class ForwarderTests(unittest.TestCase):
         event = threading.Event()
 
         class RetrySink(core.KfSink):
-            def send(self, text):
+            def send(self, text, group=""):
                 attempts.append(text)
                 if len(attempts) == 1:
                     raise core.RetryableSendError("窗口暂不可用")

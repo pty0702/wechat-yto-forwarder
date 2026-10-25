@@ -33,18 +33,27 @@ def _strip_sender_prefix(content: str, sender: str) -> str:
 
 
 class WechatDbAdapter:
-    """微信消息来源与发送端；读用本地库，发用坐标/OCR。"""
+    """微信消息来源与发送端；读用本地库，发用坐标/OCR。
+
+    group 接受单个群名或群名列表（多群模式）：列表时依次建立基线、
+    合并返回新消息（Message.group 标记来源群），发送端按 group 参数
+    定向发送，缺省发第一个群。
+    """
 
     def __init__(self, profile, group, log=print, db=None, gui=None):
         self.profile = profile
-        self.group = group
+        self.groups = [str(g).strip() for g in
+                       (group if isinstance(group, (list, tuple)) else [group])
+                       if str(g).strip()]
+        self.group = self.groups[0] if self.groups else ""
         self.log = log
         self.self_names = [str(name).strip() for name in profile.get("self_names", [])
                            if str(name).strip()]
         self._db = db
         self._gui = gui
-        self._chat_id = None
-        self._since_seq = 0
+        self._chats = {}       # 群名 -> chat_id
+        self._since = {}       # 群名 -> sort_seq 水位
+        self._confirm_chats = {}   # 群名 -> chat_id（发送确认用，与读水位无关）
 
     # ------------------------------------------------------------------
     # 库与发送器（惰性；测试可直接注入）
@@ -66,65 +75,91 @@ class WechatDbAdapter:
     # ------------------------------------------------------------------
     def prepare(self):
         db = self._wechat_db()
-        chat_id = db.group_name_to_id(self.group)
-        if not chat_id:
-            raise AdapterConfigurationError(f"微信数据库中找不到目标群：{self.group}")
-        self._chat_id = chat_id
-        rows = db.get_messages(chat_id, limit=1)
-        self._since_seq = rows[0]["sort_seq"] if rows else 0
-        self.log(f"[适配] 微信数据库已绑定 {self.group}，基线 sort_seq={self._since_seq}")
+        if not self.groups:
+            raise AdapterConfigurationError("微信数据库适配器没有配置任何群")
+        for name in self.groups:
+            chat_id = db.group_name_to_id(name)
+            if not chat_id:
+                raise AdapterConfigurationError(f"微信数据库中找不到目标群：{name}")
+            self._chats[name] = chat_id
+            self._confirm_chats[name] = chat_id
+            rows = db.get_messages(chat_id, limit=1)
+            self._since[name] = rows[0]["sort_seq"] if rows else 0
+        self._chat_id = self._chats[self.group] if self.group else None
+        self._since_seq = self._since.get(self.group, 0)
+        self.log(f"[适配] 微信数据库已绑定 {'、'.join(self.groups)}，"
+                 f"基线 {self._since}")
 
     def fetch_new(self):
-        if self._chat_id is None:
+        if not self._chats:
             raise AdapterConfigurationError("微信数据库适配器尚未 prepare")
-        rows = self._wechat_db().get_messages(self._chat_id, limit=50)
-        messages = []
-        for row in rows:
-            seq = int(row.get("sort_seq") or 0)
-            if seq <= self._since_seq:
-                continue
-            msg = self._to_message(row)
-            if msg is not None:
-                messages.append(msg)
-        if rows:
-            self._since_seq = max(self._since_seq, max(int(r.get("sort_seq") or 0) for r in rows))
-        return list(reversed(messages))
+        db = self._wechat_db()
+        collected = []
+        for name, chat_id in self._chats.items():
+            rows = db.get_messages(chat_id, limit=50)
+            messages = []
+            for row in rows:
+                seq = int(row.get("sort_seq") or 0)
+                if seq <= self._since[name]:
+                    continue
+                msg = self._to_message(row, group=name)
+                if msg is not None:
+                    messages.append(msg)
+            if rows:
+                self._since[name] = max(self._since[name],
+                                        max(int(r.get("sort_seq") or 0) for r in rows))
+                if name == self.group:
+                    self._since_seq = self._since[name]
+            collected.extend(reversed(messages))
+        return collected
 
     def fetch_replies(self, bot_name):
         return [msg for msg in self.fetch_new() if msg.sender == bot_name]
 
-    def _to_message(self, row):
+    def _to_message(self, row, group=""):
         sender_id = str(row.get("sender_username") or "").strip()
         if not sender_id:
             return None
         db = self._wechat_db()
-        display = str(db.get_nickname(sender_id) or "").strip() or sender_id
+        display = str(db.get_nickname(sender_id) or sender_id).strip() or sender_id
         content = _strip_sender_prefix(row.get("content") or "", sender_id)
         kind = "text" if row.get("type") == _TEXT_KIND else "media"
         is_self = sender_id == db.wxid or display in self.self_names
         message_id = "wxdb:%s:%s:%s" % (
-            self._chat_id, row.get("shard") or "", row.get("local_id"),
+            self._chats.get(group) or self._chat_id, row.get("shard") or "", row.get("local_id"),
         )
-        return Message(display, content, message_id=message_id, is_self=is_self, kind=kind)
+        return Message(display, content, message_id=message_id, is_self=is_self,
+                       kind=kind, group=group)
 
     # ------------------------------------------------------------------
     # 发送（WeChatGUI + 本地库读回确认）
     # ------------------------------------------------------------------
-    def _send(self, text, staff=None):
+    def _resolve_chat(self, group):
+        """发送目标群：group 为空用默认群；不在配置列表里直接拒绝。"""
+        name = (group or self.group).strip()
+        if name not in self._confirm_chats:
+            raise AdapterConfigurationError(
+                f"发送目标群不在配置的微信群列表内：{name or '(空)'}")
+        return name, self._confirm_chats[name]
+
+    def _send(self, text, staff=None, group=""):
         if not isinstance(text, str) or not text:
             raise AdapterConfigurationError("发送文本不能为空")
-        if self._chat_id is None:
+        if not self._confirm_chats:
             raise AdapterConfigurationError("微信数据库适配器尚未 prepare")
+        from wechat_forwarder import split_staff
+        staff_list = split_staff(staff) if staff else []
+        name, chat_id = self._resolve_chat(group)
         db = self._wechat_db()
-        rows = db.get_messages(self._chat_id, limit=1)
-        before_seq = int(rows[0].get("sort_seq") or 0) if rows else self._since_seq
+        rows = db.get_messages(chat_id, limit=1)
+        before_seq = int(rows[0].get("sort_seq") or 0) if rows else self._since.get(name, 0)
         gui = self._wechat_gui()
         try:
             # verify 交给本模块自己做：wechatauto 内置读回在本机有误报。
-            if staff:
-                response = gui.at_member(staff, text, who=self.group, verify=False)
+            if staff_list:
+                response = gui.at_members(staff_list, text, who=name, verify=False)
             else:
-                response = gui.send_msg(text, who=self.group, verify=False)
+                response = gui.send_msg(text, who=name, verify=False)
         except Exception as exc:
             raise SendUncertainError(f"发送结果不确定，请人工核对：{exc}") from exc
         if not getattr(response, "is_success", False):
@@ -134,29 +169,33 @@ class WechatDbAdapter:
         while time.monotonic() < deadline:
             # 微信写库异步：get_new_messages 在落库初期可能漏行，改扫最近消息。
             try:
-                recent = db.get_messages(self._chat_id, limit=30)
+                recent = db.get_messages(chat_id, limit=30)
             except Exception:
                 time.sleep(0.4)
                 continue
             for row in recent:
                 if int(row.get("sort_seq") or 0) <= before_seq:
                     continue
-                msg = self._to_message(row)
+                msg = self._to_message(row, group=name)
                 if msg is None or not msg.is_self:
                     continue
-                if staff:
-                    matched = expected in msg.content and staff in msg.content
+                if staff_list:
+                    matched = expected in msg.content and all(
+                        s in msg.content for s in staff_list)
                 else:
                     matched = _normalized(msg.content).strip() == _normalized(text).strip()
                 if matched:
-                    self._since_seq = max(self._since_seq, int(row.get("sort_seq") or 0))
+                    self._since[name] = max(self._since.get(name, 0),
+                                            int(row.get("sort_seq") or 0))
+                    if name == self.group:
+                        self._since_seq = self._since[name]
                     return
             time.sleep(0.4)
         raise SendUncertainError(
             "发送后未在微信数据库确认到本账号消息，请人工核对；已停止，避免重复发送")
 
-    def send(self, text):
-        self._send(text)
+    def send(self, text, group=""):
+        self._send(text, group=group)
 
-    def send_mention(self, staff, text):
-        self._send(text, staff=staff)
+    def send_mention(self, staff, text, group=""):
+        self._send(text, staff=staff, group=group)
