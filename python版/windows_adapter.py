@@ -486,11 +486,23 @@ class WindowsChatAdapter:
                 raise AdapterConfigurationError(f"输入未完成，未执行发送；请检查保留的草稿：{exc}") from exc
             raise
 
-    def send(self, text):
+    def send(self, text, group: str = ""):
+        self._check_target_group(group)
         self._send(text)
 
-    def send_mention(self, staff, text):
+    def send_mention(self, staff, text, group: str = ""):
+        self._check_target_group(group)
         self._send(text, staff=staff)
+
+    def _check_target_group(self, group: str):
+        """本适配器按 profile 绑定单一群；转发引擎带群参数调用时必须核对。
+
+        多群配置（wx_groups 多项）走本路线时，非默认群的定向发送无法
+        保障落点，直接拒绝而不是发错群。
+        """
+        if group and group.strip() != (self.group or "").strip():
+            raise RetryableSendError(
+                f"selectors/wechat4 适配器只支持单群，拒绝发往：{group}")
 
 
 def _automation():

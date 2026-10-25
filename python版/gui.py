@@ -163,7 +163,7 @@ class ConfigWindow(tk.Tk):
         keywords.rowconfigure(1, weight=1)
         ttk.Label(keywords, text="屏蔽词（全局，一行一个）").grid(row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Label(keywords, text="@ 客服词句（全局，一行一个）").grid(row=0, column=1, sticky="w", pady=(0, 4), padx=(12, 0))
-        ttk.Label(keywords, text="按群覆盖（群名|屏蔽词,词|@词,词）").grid(row=0, column=2, sticky="w", pady=(0, 4), padx=(12, 0))
+        ttk.Label(keywords, text="按群覆盖（群名|屏蔽词|@词；空段=清空，缺段=用全局）").grid(row=0, column=2, sticky="w", pady=(0, 4), padx=(12, 0))
         self.txt_block = tk.Text(keywords, height=7, width=26, wrap="word", undo=True)
         self.txt_at = tk.Text(keywords, height=7, width=26, wrap="word", undo=True)
         self.txt_policies = tk.Text(keywords, height=7, width=30, wrap="none", undo=True)
@@ -241,7 +241,11 @@ class ConfigWindow(tk.Tk):
 
     @staticmethod
     def _parse_policies(lines, known_groups):
-        """解析「群名|屏蔽词,词|@词,词」行；群名必须在群列表内。"""
+        """解析「群名|屏蔽词,词|@词,词」行；群名必须在群列表内。
+
+        段存在即显式设置（空段=清空该类词），整段缺失=继承全局——与
+        引擎 group_policies 的语义一致，保存/回读 round-trip 不丢清空设置。
+        """
         policies = {}
         for line in lines:
             parts = [p.strip() for p in line.split("|")]
@@ -251,9 +255,9 @@ class ConfigWindow(tk.Tk):
             if group not in known_groups:
                 raise ValueError(f"按群覆盖里的群「{group}」不在微信群列表内")
             policy = {}
-            if len(parts) > 1 and parts[1]:
+            if len(parts) > 1:
                 policy["block_keywords"] = [w for w in parts[1].split(",") if w.strip()]
-            if len(parts) > 2 and parts[2]:
+            if len(parts) > 2:
                 policy["at_keywords"] = [w for w in parts[2].split(",") if w.strip()]
             if policy:
                 policies[group] = policy
@@ -588,7 +592,8 @@ class ActivationDialog(tk.Toplevel):
         buttons = ttk.Frame(body)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="退出", command=self.destroy).pack(side="left")
-        ttk.Button(buttons, text="激活", command=self.on_activate).pack(side="right")
+        self.btn_activate = ttk.Button(buttons, text="激活", command=self.on_activate)
+        self.btn_activate.pack(side="right")
         self.bind("<Return>", lambda _event: self.on_activate())
         self.update_idletasks()
         x = max(0, parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2)
@@ -601,15 +606,27 @@ class ActivationDialog(tk.Toplevel):
         if not key:
             self.var_status.set("请先输入卡密")
             return
+        # 网络验证放后台线程：同步请求会把窗口冻结最多 8 秒，像假死。
         self.var_status.set("正在激活…")
-        self.update_idletasks()
-        status = license_client.activate(key)
-        if status.ok:
-            self.granted = True
-            self.license_key = key
-            self.destroy()
-            return
-        self.var_status.set(status.message or "激活失败，请核对卡密")
+        self.btn_activate.configure(state="disabled")
+
+        def done(status):
+            self.btn_activate.configure(state="normal")
+            if status.ok:
+                self.granted = True
+                self.license_key = key
+                self.destroy()
+                return
+            self.var_status.set(status.message or "激活失败，请核对卡密")
+
+        def work():
+            status = license_client.activate(key)
+            try:
+                self.after(0, lambda: done(status))
+            except tk.TclError:
+                pass   # 对话框已被用户关闭
+
+        threading.Thread(target=work, name="license-activate", daemon=True).start()
 
 
 def _license_notice(status):
