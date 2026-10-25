@@ -2691,12 +2691,19 @@ class WeChatGUI:
             # 按昵称过滤出目标成员。粘贴后草稿为空则关残留弹层、重校准并重试
             # 一次，仍为空才失败；不再在空输入上继续找候选。
             for attempt in (1, 2):
+                clipboard_failed = False
                 if self.set_clipboard('@'):
                     self._input.key(VK_V, ctrl=True)
                     time.sleep(0.45)
                     if self.set_clipboard(member):
                         self._input.key(VK_V, ctrl=True)
                         time.sleep(0.9)
+                    else:
+                        clipboard_failed = True
+                else:
+                    clipboard_failed = True
+                if clipboard_failed:
+                    wxlog.warning('剪贴板写入失败：常见于杀毒软件拦截，请把本程序加入白名单')
                 got = self._draft_via_uia()
                 if got is not None:
                     if member in got or '@' in got or '\ufffc' in got:
@@ -2713,7 +2720,10 @@ class WeChatGUI:
                     if not self.focus_input():
                         break
             if not typed:
-                return abort(f'粘贴 @ 昵称后输入框仍为空，已停止发送；请检查窗口焦点')
+                if clipboard_failed:
+                    return abort('剪贴板写入失败，无法粘贴 @ 昵称；请把本程序加入杀毒软件白名单后重试')
+                return abort('粘贴 @ 昵称后输入框仍为空，已停止发送；请检查微信是否在前台、'
+                             '操作期间是否被遮挡或动了鼠标键盘')
             # 本项目修改：OCR 窗口收紧到输入框正上方（联想弹层实际出现的位置，
             # 实测候选距输入框顶 60~130px）。窗口过宽会把消息区里含昵称的历史行
             # 当候选点进去（点到消息区会丢草稿）。
