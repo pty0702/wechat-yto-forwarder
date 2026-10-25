@@ -10,25 +10,13 @@ DOM 选择器来自本机 2.0.0.2 页面结构核对：消息行 div[id=数字]�
 from __future__ import annotations
 
 import json
-import re
 import time
 import urllib.request
 
 from wechat_forwarder import Message, RetryableSendError, SendUncertainError
-from windows_adapter import AdapterConfigurationError, _normalized, _TIME
+from windows_adapter import AdapterConfigurationError, _comparable, _TIME
 
 _DEFAULT_CDP = "http://127.0.0.1:9223"
-
-# contenteditable 输入框会把空格存成 &nbsp;(U+00A0)，微信 @ 提及分隔是
-# U+2005，中文全角空格 U+3000——插入后回读与原文的普通空格不相等，
-# 曾导致真实消息（含空格）全部报「输入结果与原文不同」而验收文本
-# （不含空格）能过。比对前把空格类统一折叠。
-_SPACE_RE = re.compile(r"[\s\u00a0\u2000-\u200a\u2005\u202f\u205f\u3000]+")
-
-
-def _comparable(text: str) -> str:
-    """发送比对用归一：统一换行，空格类折叠为单个普通空格并去首尾。"""
-    return _SPACE_RE.sub(" ", _normalized(text or "")).strip()
 
 
 class _Cdp:

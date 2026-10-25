@@ -123,6 +123,20 @@ def _normalized(text):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+# contenteditable 输入框会把空格存成 &nbsp;(U+00A0)，微信 @ 提及分隔是
+# U+2005，中文全角空格 U+3000——插入/落库回读与原文的普通空格不相等，
+# 曾导致含空格的真实消息在客户管家与微信两侧的确认全部误报。比对前
+# 把空格类统一折叠。
+import re as _re
+
+_SPACE_RE = _re.compile(r"[\s\u00a0\u2000-\u200a\u202f\u205f\u3000]+")
+
+
+def _comparable(text):
+    """发送确认比对用归一：统一换行，空格类折叠为单个普通空格并去首尾。"""
+    return _SPACE_RE.sub(" ", _normalized(text or "")).strip()
+
+
 def literal_keys(text):
     """SendKeys 花括号必须转义，消息内容不能解释为快捷键。"""
     return "".join("{{}" if char == "{" else "{}}" if char == "}" else char for char in text)

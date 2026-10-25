@@ -129,5 +129,31 @@ class MultiGroupRoutingTests(unittest.TestCase):
         self.assertEqual(kf_sink.sent, [])
 
 
+class SafeSkipMentionTests(unittest.TestCase):
+    """@ 的安全失败（客服名不在群里）跳过该条继续运行，不停机。"""
+
+    def test_safe_skip_continues_and_logs(self):
+        from wechat_forwarder import SafeSkipError
+
+        cfg = cfg_two_groups()
+        msg = Message("客户", "YT1111111111111 加急", group="A群")
+
+        class SkippingSink(RecordingSink):
+            def send_mention(self, staff, text, group=""):
+                raise SafeSkipError("候选弹层中没有「圆通快递」的精确候选，已停止发送")
+
+        sink = SkippingSink()
+        kf_sink = KfRecordingSink()
+        logs = []
+        forwarder = Forwarder(cfg, ListSource([msg]), sink,
+                              ListSource([]), kf_sink, log=logs.append)
+        forwarder.poll_once()          # 不应抛错停机
+        self.assertEqual(sink.mentions, [])
+        self.assertTrue(any("已跳过" in line for line in logs))
+        # 该条已消费，不会反复重试
+        forwarder.poll_once()
+        self.assertEqual(sink.mentions, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,8 +12,8 @@ import sys
 import time
 from pathlib import Path
 
-from wechat_forwarder import Message, SendUncertainError
-from windows_adapter import AdapterConfigurationError, _normalized
+from wechat_forwarder import Message, SafeSkipError, SendUncertainError
+from windows_adapter import AdapterConfigurationError, _comparable, _normalized
 
 _VENDOR = Path(__file__).resolve().parent / "vendor"
 if str(_VENDOR) not in sys.path:
@@ -21,6 +21,23 @@ if str(_VENDOR) not in sys.path:
 
 # 群聊消息正文在库里带 "发送者账号:\\n" 前缀，搬运前剥掉。
 _TEXT_KIND = "文本"
+
+# @ 流程中「确定未发出」的失败文案（at_members 的 abort 路径）：候选无
+# 精确匹配 / 坐标异常 / 未选中 / 会话被切走 / 发送动作未生效——全部发生
+# 在消息发出之前或已清场，跳过该条是安全的。
+_SAFE_MENTION_FAILURES = (
+    "候选弹层中没有", "候选坐标异常", "@ 未选中", "会话被切走",
+    "回车与发送按钮均未能发出", "未打开目标会话",
+)
+
+
+def _response_message(response) -> str:
+    return str(getattr(response, "message", "") or response)
+
+
+def _is_safe_mention_failure(response) -> bool:
+    message = _response_message(response)
+    return any(prefix in message for prefix in _SAFE_MENTION_FAILURES)
 
 
 def _strip_sender_prefix(content: str, sender: str) -> str:
@@ -163,8 +180,12 @@ class WechatDbAdapter:
         except Exception as exc:
             raise SendUncertainError(f"发送结果不确定，请人工核对：{exc}") from exc
         if not getattr(response, "is_success", False):
+            if staff_list and _is_safe_mention_failure(response):
+                # @ 流程的确定未发送失败（候选无匹配/未选中/被清场）：
+                # 跳过该条提醒继续运行，不再停机等人工。
+                raise SafeSkipError(_response_message(response))
             raise SendUncertainError(f"发送结果不确定，请人工核对：{response}")
-        expected = text.strip()
+        expected = _comparable(text)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             # 微信写库异步：get_new_messages 在落库初期可能漏行，改扫最近消息。
@@ -180,10 +201,10 @@ class WechatDbAdapter:
                 if msg is None or not msg.is_self:
                     continue
                 if staff_list:
-                    matched = expected in msg.content and all(
-                        s in msg.content for s in staff_list)
+                    matched = expected in _comparable(msg.content) and all(
+                        _comparable(s) in _comparable(msg.content) for s in staff_list)
                 else:
-                    matched = _normalized(msg.content).strip() == _normalized(text).strip()
+                    matched = _comparable(msg.content) == _comparable(text)
                 if matched:
                     self._since[name] = max(self._since.get(name, 0),
                                             int(row.get("sort_seq") or 0))

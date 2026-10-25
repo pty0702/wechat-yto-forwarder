@@ -308,6 +308,11 @@ class RetryableSendError(RuntimeError):
     """适配器确定消息尚未发出，可以安全地重试。"""
 
 
+class SafeSkipError(RuntimeError):
+    """发送端确定消息未发出且重试无意义（如 @ 的成员不在群里）；
+    调用方应放弃该条消息继续运行，而不是停机等人工。"""
+
+
 class SendUncertainError(RuntimeError):
     """发送动作已尝试，无法确认结果；必须停止并由用户核对。"""
 
@@ -395,7 +400,7 @@ class Forwarder:
             raise _StopRequested
         try:
             send(*args)
-        except RetryableSendError:
+        except (RetryableSendError, SafeSkipError):
             raise
         except SendUncertainError as exc:
             self._uncertain_error = exc
@@ -414,7 +419,16 @@ class Forwarder:
                 staff = self.cfg["service_staff"]
                 if not staff:
                     raise ValueError("命中 @客服词句，但客服完整名称未配置；消息保留待处理")
-                self._send(self.wx_snk.send_mention, staff, msg.content, target_group)
+                try:
+                    self._send(self.wx_snk.send_mention, staff, msg.content, target_group)
+                except SafeSkipError as exc:
+                    # 确定未发出且重试无意义（典型：客服名不是群成员）：
+                    # 放弃该条提醒继续运行，配置修好后下一条自然生效。
+                    self._seen_wx.add(message_id)
+                    del self._wx_buffer[message_id]
+                    self.log(f"[艾特客服] 已跳过一条（{exc}）；"
+                             "请核对客服名与微信群成员昵称完全一致")
+                    continue
                 notice = (f"[艾特客服] 已在 {target_group} @{staff}：{msg.content[:40]}")
             elif verdict is Verdict.FORWARD:
                 self._send(self.kf_snk.send, msg.content)
