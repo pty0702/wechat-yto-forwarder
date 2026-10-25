@@ -21,6 +21,10 @@ hidden = [
     "wechatauto.uia_driver", "wechatauto.accessibility",
     # 常见 hook 盲区
     "pyperclip", "websockets",
+    # winsdk（WinRT OCR）是命名空间包且只在 guia 函数内 import，
+    # 静态收集不稳定曾整包静默丢失（2026-10-26 实测 zip 缩水 11MB）——显式列出
+    "winsdk", "winsdk.windows", "winsdk.windows.media.ocr",
+    "winsdk.windows.globalization", "winsdk.windows.storage.streams",
 ]
 
 a = Analysis(
