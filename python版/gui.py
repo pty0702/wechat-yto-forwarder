@@ -113,6 +113,7 @@ class ConfigWindow(tk.Tk):
         self.var_staff = tk.StringVar()
         self.var_bot = tk.StringVar()
         self.var_kf_self = tk.StringVar()
+        self.var_followup = tk.StringVar()
         self.var_profile = tk.StringVar()
         self.var_poll = tk.StringVar()
         self.var_timeout = tk.StringVar()
@@ -133,6 +134,7 @@ class ConfigWindow(tk.Tk):
             ("客户管家群名", self.var_kf),
             ("你在客户管家的显示名（多个用顿号分隔）", self.var_kf_self),
             ("被 @ 的客服名（多人用顿号分隔）", self.var_staff),
+            ("@ 后跟进消息（留空不发）", self.var_followup),
             ("机器人发送者名称", self.var_bot),
         ]
         for row, (label, variable) in enumerate(fields, start=3):
@@ -241,7 +243,9 @@ class ConfigWindow(tk.Tk):
         self.txt_wx_groups.insert("1.0", "\n".join(groups))
         for variable, key, default in (
             (self.var_kf, "kf_group", ""),
-            (self.var_staff, "service_staff", ""), (self.var_bot, "bot_name", "小圆-总公司"),
+            (self.var_staff, "service_staff", ""),
+            (self.var_followup, "mention_followup", "转人工处理"),
+            (self.var_bot, "bot_name", "小圆-总公司"),
             (self.var_profile, "adapter_profile", ""), (self.var_poll, "poll_interval", 3),
             (self.var_timeout, "reset_seconds", 30),
         ):
@@ -318,7 +322,9 @@ class ConfigWindow(tk.Tk):
             "wx_groups": groups,
             "group_policies": policies,
             "kf_group": self.var_kf.get().strip(),
-            "service_staff": self.var_staff.get().strip(), "bot_name": self.var_bot.get().strip(),
+            "service_staff": self.var_staff.get().strip(),
+            "mention_followup": self.var_followup.get().strip(),
+            "bot_name": self.var_bot.get().strip(),
             "block_keywords": self._lines(self.txt_block), "at_keywords": self._lines(self.txt_at),
             "adapter_profile": profile, "poll_interval": poll, "reset_seconds": timeout,
             "wechat_accessibility": bool(self.var_wechat_accessibility.get()),

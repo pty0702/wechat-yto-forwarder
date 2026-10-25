@@ -120,13 +120,23 @@ class MultiGroupRoutingTests(unittest.TestCase):
         forwarder.poll_once()
         self.assertEqual(kf_sink.sent, ["YT1111111111111 B专属屏蔽"])
 
-    def test_at_service_mentions_in_origin_group_with_staff_list(self):
+    def test_at_service_mentions_staff_only_then_followup(self):
+        """命中 @ 词：第一条只 @ 客服（空正文），第二条跟进「转人工处理」。"""
         cfg = cfg_two_groups()
         msg = Message("客户", "YT1111111111111 加急", group="B群")
         forwarder, sink, kf_sink = make_forwarder(cfg, wx_messages=[msg])
         forwarder.poll_once()
-        self.assertEqual(sink.mentions, [("客服A、客服B", "YT1111111111111 加急", "B群")])
+        self.assertEqual(sink.mentions, [("客服A、客服B", "", "B群")])
+        self.assertEqual(sink.sent, [("转人工处理", "B群")])
         self.assertEqual(kf_sink.sent, [])
+
+    def test_at_service_without_followup_sends_mention_only(self):
+        cfg = cfg_two_groups(mention_followup="")
+        msg = Message("客户", "YT1111111111111 加急", group="B群")
+        forwarder, sink, _kf = make_forwarder(cfg, wx_messages=[msg])
+        forwarder.poll_once()
+        self.assertEqual(sink.mentions, [("客服A、客服B", "", "B群")])
+        self.assertEqual(sink.sent, [])
 
 
 class SafeSkipMentionTests(unittest.TestCase):
@@ -149,6 +159,7 @@ class SafeSkipMentionTests(unittest.TestCase):
                               ListSource([]), kf_sink, log=logs.append)
         forwarder.poll_once()          # 不应抛错停机
         self.assertEqual(sink.mentions, [])
+        self.assertEqual(sink.sent, [])   # 跟进消息也不发
         self.assertTrue(any("已跳过" in line for line in logs))
         # 该条已消费，不会反复重试
         forwarder.poll_once()

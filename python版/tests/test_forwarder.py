@@ -74,10 +74,13 @@ class ForwarderTests(unittest.TestCase):
 
     def test_mentions_use_real_mention_interface(self):
         calls = []
+        followups = []
 
         class MentionSink(core.WxSink):
             def send(self, text, group=""):
-                raise AssertionError("提及不能通过普通文本发送接口")
+                # @ 提醒本身不允许走普通文本接口；跟进消息（转人工处理）是
+                # 合法的普通文本，单独记录。
+                followups.append((text, group))
 
             def send_mention(self, staff, text, group=""):
                 calls.append((staff, text))
@@ -85,7 +88,8 @@ class ForwarderTests(unittest.TestCase):
         self.forwarder.wx_snk = MentionSink()
         self.wx.inbox = [core.Message("客户", f"{WB1} 投诉")]
         self.forwarder.poll_wx()
-        self.assertEqual(calls, [("客服张", f"{WB1} 投诉")])
+        self.assertEqual(calls, [("客服张", "")])
+        self.assertEqual(followups, [("转人工处理", "客户群")])
         self.assertEqual(self.sent_kf, [])
 
     def test_consumed_batch_is_retained_after_retryable_send_failure(self):
@@ -281,6 +285,11 @@ class ConfigTests(unittest.TestCase):
         self.config_patch = patch.object(core, "CONFIG_FILE", str(self.path))
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
+        # 迁移源也指向临时目录（不存在），避免读到开发机真实配置
+        self.legacy_patch = patch.object(core, "_LEGACY_CONFIG_FILE",
+                                         str(self.path.parent / "legacy-none.json"))
+        self.legacy_patch.start()
+        self.addCleanup(self.legacy_patch.stop)
 
     def test_old_config_gets_defaults_and_is_not_mutated(self):
         old = {"wx_group": " 群A ", "block_keywords": ["退回", " 退回 ", ""]}

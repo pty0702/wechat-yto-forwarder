@@ -39,7 +39,36 @@ from typing import Callable, Dict, List, Optional
 # 配置
 # ---------------------------------------------------------------------------
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+# 配置放在用户数据目录（C 盘 LOCALAPPDATA），解压目录随意更换/删除/
+# 升级版本都不丢配置与激活；老版本把配置放在软件目录（模块旁），首次
+# 运行时自动迁移（含 adapter profile 一并复制并改写路径）。
+DATA_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "YtoForwarder")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+_LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+def _migrate_legacy_config() -> None:
+    """老位置（模块旁）有配置而新位置（用户数据目录）没有时迁移一次。"""
+    if os.path.exists(CONFIG_FILE) or not os.path.exists(_LEGACY_CONFIG_FILE):
+        return
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        legacy = json.load(open(_LEGACY_CONFIG_FILE, "r", encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return
+    profile_path = str(legacy.get("adapter_profile") or "")
+    if profile_path and os.path.isfile(profile_path):
+        new_profile_dir = os.path.join(DATA_DIR, "profiles")
+        os.makedirs(new_profile_dir, exist_ok=True)
+        new_profile = os.path.join(new_profile_dir, os.path.basename(profile_path))
+        if not os.path.exists(new_profile):
+            import shutil
+            shutil.copyfile(profile_path, new_profile)
+        legacy["adapter_profile"] = new_profile
+    with open(CONFIG_FILE, "w", encoding="utf-8") as stream:
+        json.dump(legacy, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
 
 DEFAULT_CONFIG = {
     "wx_group": "",       # 单群写法（兼容旧配置）；新配置用 wx_groups
@@ -49,6 +78,7 @@ DEFAULT_CONFIG = {
     "at_keywords": [],     # @客服词句（全局默认）：YT 消息命中即 @客服
     "group_policies": {},  # 按群覆盖：{"群名": {"block_keywords": [], "at_keywords": []}}
     "service_staff": "",   # 客服名：多人用顿号/逗号分隔，@ 时一条消息全部提醒
+    "mention_followup": "转人工处理",  # @ 提醒后紧跟着发的纯文字（空=不发）
     "bot_name": "小圆-总公司",  # 必须与机器人显示的完整名称一致
     "poll_interval": 3,    # 轮询间隔（秒）
     "reset_seconds": 30,   # 转发后 30 秒未等到小圆回复 → 重置该条等待
@@ -73,7 +103,8 @@ def validate_config(cfg: dict, live: bool = False) -> dict:
         raise ValueError("配置必须是 JSON 对象")
     normalized = copy.deepcopy(DEFAULT_CONFIG)
     normalized.update(copy.deepcopy(cfg))
-    for key in ("wx_group", "kf_group", "service_staff", "bot_name", "mode"):
+    for key in ("wx_group", "kf_group", "service_staff", "bot_name", "mode",
+                "mention_followup"):
         value = normalized[key]
         if not isinstance(value, str):
             raise ValueError(f"配置项 {key} 必须是字符串")
@@ -146,6 +177,7 @@ def validate_config(cfg: dict, live: bool = False) -> dict:
 
 def load_config() -> dict:
     """首次使用返回默认配置，已有配置损坏时明确报错并保留原文件。"""
+    _migrate_legacy_config()
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8-sig") as stream:
             cfg = json.load(stream)
@@ -159,6 +191,7 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     """同目录写入并原子替换，写入失败时保留原配置。"""
     normalized = validate_config(cfg)
+    os.makedirs(os.path.dirname(os.path.abspath(CONFIG_FILE)), exist_ok=True)
     filename = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -419,8 +452,13 @@ class Forwarder:
                 staff = self.cfg["service_staff"]
                 if not staff:
                     raise ValueError("命中 @客服词句，但客服完整名称未配置；消息保留待处理")
+                followup = str(self.cfg.get("mention_followup") or "").strip()
                 try:
-                    self._send(self.wx_snk.send_mention, staff, msg.content, target_group)
+                    # 第一条：只 @ 客服（不带原文，群里已有客户原话）；
+                    # 第二条：紧跟纯文字跟进（默认「转人工处理」，空=不发）。
+                    self._send(self.wx_snk.send_mention, staff, "", target_group)
+                    if followup:
+                        self._send(self.wx_snk.send, followup, target_group)
                 except SafeSkipError as exc:
                     # 确定未发出且重试无意义（典型：客服名不是群成员）：
                     # 放弃该条提醒继续运行，配置修好后下一条自然生效。
@@ -429,7 +467,8 @@ class Forwarder:
                     self.log(f"[艾特客服] 已跳过一条（{exc}）；"
                              "请核对客服名与微信群成员昵称完全一致")
                     continue
-                notice = (f"[艾特客服] 已在 {target_group} @{staff}：{msg.content[:40]}")
+                notice = (f"[艾特客服] 已在 {target_group} @{staff}"
+                          + (f"，跟进：{followup}" if followup else ""))
             elif verdict is Verdict.FORWARD:
                 self._send(self.kf_snk.send, msg.content)
                 self.queue.add(extract_waybill(msg.content), target_group)

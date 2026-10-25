@@ -160,7 +160,10 @@ class WechatDbAdapter:
         return name, self._confirm_chats[name]
 
     def _send(self, text, staff=None, group=""):
-        if not isinstance(text, str) or not text:
+        if not isinstance(text, str):
+            raise AdapterConfigurationError("发送文本必须是字符串")
+        if not text and not staff:
+            # @ 场景允许空正文（只发 @ 不带原文）；纯文本必须有内容。
             raise AdapterConfigurationError("发送文本不能为空")
         if not self._confirm_chats:
             raise AdapterConfigurationError("微信数据库适配器尚未 prepare")

@@ -73,6 +73,7 @@ def write_setup(wx_groups, kf_group: str, service_staff: str, bot_name: str,
         wx_groups = [wx_groups]
     wx_groups = [g.strip() for g in wx_groups if str(g).strip()]
     profile = build_profile(wx_self_name, kf_self_names, cdp_url)
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     profile_path = PROFILE_DIR / "wizard.generated.json"
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n",
