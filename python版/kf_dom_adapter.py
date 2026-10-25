@@ -242,7 +242,10 @@ class KfDomAdapter:
             "(() => { const el = document.getElementById('edit-content');"
             " return el ? (el.innerText || '') : ''; })()") or "")
         if _normalized(draft).strip() != _normalized(text).strip():
-            raise AdapterConfigurationError("输入结果与原文不同，已保留草稿，未提交发送")
+            raise AdapterConfigurationError(
+                f"输入结果与原文不同（原文 {len(text)} 字，回读 {len(draft)} 字"
+                f"：{draft[:40]!r}），已保留草稿，未提交发送；"
+                "常见原因：中文输入法处于组合状态，请切英文输入法后重试")
         if cdp.evaluate(
                 "(() => { const b = document.querySelector('button.send-btn');"
                 " return !b || b.disabled; })()"):
