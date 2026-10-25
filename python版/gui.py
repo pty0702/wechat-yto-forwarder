@@ -200,6 +200,8 @@ class ConfigWindow(tk.Tk):
         self.btn_save.pack(side="left", padx=6)
         self.btn_diagnose = ttk.Button(footer, text="窗口诊断 (Ctrl+D)", command=self.on_diagnose)
         self.btn_diagnose.pack(side="left")
+        self.btn_export = ttk.Button(footer, text="导出诊断包", command=self.on_export_diagnostics)
+        self.btn_export.pack(side="left", padx=6)
         self.btn_preflight = ttk.Button(footer, text="适配检查 (Ctrl+T)", command=self.on_preflight)
         self.btn_preflight.pack(side="left", padx=6)
         self.btn_stop = ttk.Button(footer, text="停止", command=self.on_stop, state="disabled")
@@ -603,6 +605,53 @@ class ConfigWindow(tk.Tk):
             self.txt_log.delete("1.0", f"{lines - 2800}.0")
         self.txt_log.see("end")
         self.txt_log.configure(state="disabled")
+
+    def on_export_diagnostics(self):
+        """一键导出诊断包：界面日志、判定与错误日志、wechatauto 详细日志、配置。"""
+        import zipfile
+        from datetime import datetime as _dt
+        default_name = f"诊断包_{_dt.now():%Y%m%d_%H%M}.zip"
+        target = filedialog.asksaveasfilename(
+            title="导出诊断包", initialfile=default_name,
+            defaultextension=".zip", filetypes=[("ZIP 压缩包", "*.zip")], parent=self)
+        if not target:
+            return
+        candidates = [
+            ("界面日志.txt", None),          # 特殊处理：来自日志文本框
+            (f"config.json", Path(CONFIG_FILE)),
+            (f"profile.json", Path(str(self.cfg.get("adapter_profile") or ""))),
+            ("error.log", ERROR_LOG),
+        ]
+        wx_logs = sorted(Path(PROJECT_DIR).glob("wechatauto_logs/app_*.log"))
+        for i, log_file in enumerate(wx_logs[-3:]):     # 最近 3 天的详细日志
+            candidates.append((f"wechatauto_{i}_{log_file.name}", log_file))
+        written = []
+        try:
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
+                gui_log = self.txt_log.get("1.0", "end").strip()
+                if gui_log:
+                    bundle.writestr("界面日志.txt", gui_log)
+                    written.append("界面日志.txt")
+                for name, path in candidates:
+                    if path is None:
+                        continue
+                    try:
+                        if path.is_file():
+                            bundle.writestr(name, path.read_text(encoding="utf-8", errors="replace"))
+                            written.append(name)
+                    except OSError:
+                        pass
+                bundle.writestr("说明.txt",
+                                 "诊断包内容：界面日志（含每条消息的判定原因）、配置、"
+                                 "错误日志、wechatauto 详细日志（@ 每步粘贴/候选/坐标）。\n"
+                                 "不含卡密等敏感信息，可放心发给作者。\n"
+                                 f"导出时间：{_dt.now():%Y-%m-%d %H:%M:%S}\n")
+        except OSError as exc:
+            messagebox.showerror("导出失败", str(exc), parent=self)
+            return
+        self._append_log(f"[诊断] 已导出 {len(written)} 项到 {target}")
+        messagebox.showinfo("导出成功",
+                            f"诊断包已保存：\n{target}\n请把该文件发给作者。", parent=self)
 
     def _clear_log(self):
         self.txt_log.configure(state="normal")

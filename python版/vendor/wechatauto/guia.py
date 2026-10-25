@@ -2705,6 +2705,7 @@ class WeChatGUI:
                 if clipboard_failed:
                     wxlog.warning('剪贴板写入失败：常见于杀毒软件拦截，请把本程序加入白名单')
                 got = self._draft_via_uia()
+                wxlog.info('@ 粘贴第%d个成员「%s」后草稿回读=%r', idx, member, got)
                 if got is not None:
                     if member in got or '@' in got or '\ufffc' in got:
                         typed = True
@@ -2737,6 +2738,8 @@ class WeChatGUI:
             box_top = box[1] if box else int(self.render_h * 0.70)
             popup = (self.right_pane_left, max(80, box_top - 300), self.render_w, box_top)
             items = self.ocr(popup)
+            wxlog.info('@ 候选弹层 OCR 共 %d 条：%s', len(items),
+                       [t.strip() for t, *_ in items][:8])
             target = None
             best_y = None
             for t, x, yy, w, h in items:
@@ -2753,9 +2756,10 @@ class WeChatGUI:
             py = self.origin_y + target[1]
             if px < self.origin_x + self.right_pane_left + 50 or py > self.origin_y + box_top:
                 return abort(f'候选坐标异常（{px},{py}），不在弹层区，已停止发送')
-            self.wx_click(px, py)
-            time.sleep(0.5)
-            # 点候选是全程唯一可能切走会话的操作，点完立刻核对会话。
+        wxlog.info('@ 点击候选「%s」坐标=(%d,%d)', member, px, py)
+        self.wx_click(px, py)
+        time.sleep(0.5)
+        # 点候选是全程唯一可能切走会话的操作，点完立刻核对会话。
             if who and not self._chat_is_open(who):
                 return abort('点击候选后会话被切走，已停止发送')
             # 本项目修改：@ 选中后整个提及对象在输入框里是一个 U+FFFC 内嵌对象
@@ -2767,6 +2771,8 @@ class WeChatGUI:
             if got is None:
                 time.sleep(0.4)
                 got = self._draft_via_uia()
+            wxlog.info('@ 第%d个成员选中校验：FFFC×%d（需≥%d），草稿=%r',
+                       idx, (got or '').count('\ufffc'), idx, got)
             if got is None or got.count('\ufffc') < idx:
                 return abort(f'点击候选后 @ 未选中（草稿={got!r}），已停止发送')
         if text:

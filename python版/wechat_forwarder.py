@@ -268,6 +268,28 @@ def _is_media(text: str) -> bool:
     return bool(_MEDIA_RE.match(text)) or not text.strip()
 
 
+def classify_with_reason(msg: Message, cfg: dict):
+    """classify 的详细版：同时返回判定原因，供诊断日志使用。"""
+    if msg.is_self:
+        return Verdict.IGNORE, "本人消息"
+    if msg.kind != "text":
+        return Verdict.IGNORE, f"非文本消息（{msg.kind}）"
+    if _is_media(msg.content):
+        return Verdict.IGNORE, "图片/语音等媒体占位"
+    if not starts_with_waybill(msg.content):
+        return Verdict.IGNORE, "不以 YT+单号开头"
+    policy = cfg.get("group_policies", {}).get(msg.group) or {}
+    block_words = policy.get("block_keywords", cfg.get("block_keywords", []))
+    at_words = policy.get("at_keywords", cfg.get("at_keywords", []))
+    hit_block = next((w for w in block_words if w.strip() and w.strip() in msg.content), None)
+    if hit_block:
+        return Verdict.IGNORE, f"命中屏蔽词「{hit_block}」"
+    hit_at = next((w for w in at_words if w.strip() and w.strip() in msg.content), None)
+    if hit_at:
+        return Verdict.AT_SERVICE, f"命中@客服词「{hit_at}」（按{'该群覆盖' if policy else '全局'}词表）"
+    return Verdict.FORWARD, "正常转发" + ("（按该群覆盖词表判定）" if policy else "")
+
+
 def classify(msg: Message, cfg: dict) -> Verdict:
     """方向① 的核心判定：按 屏蔽词 → @客服词 → 正常转发 的顺序。
 
@@ -446,7 +468,9 @@ class Forwarder:
     def _flush_wx(self) -> None:
         while self._wx_buffer:
             message_id, msg = next(iter(self._wx_buffer.items()))
-            verdict = classify(msg, self.cfg)
+            verdict, reason = classify_with_reason(msg, self.cfg)
+            self.log(f"[判定] {msg.group or '默认群'}/{msg.sender}："
+                     f"{msg.content[:30]!r} → {verdict.value}（{reason}）")
             target_group = msg.group or self.cfg["wx_group"]
             if verdict is Verdict.AT_SERVICE:
                 staff = self.cfg["service_staff"]

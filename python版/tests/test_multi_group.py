@@ -139,6 +139,26 @@ class MultiGroupRoutingTests(unittest.TestCase):
         self.assertEqual(sink.sent, [])
 
 
+class ClassifyReasonTests(unittest.TestCase):
+    """判定原因诊断：每条消息能说清为什么被处理/忽略。"""
+
+    def test_reasons_for_each_verdict(self):
+        from wechat_forwarder import classify_with_reason, Verdict
+        cfg = cfg_two_groups()
+        cases = [
+            (Message("客户", "大家好"), Verdict.IGNORE, "不以 YT"),
+            (Message("客户", "YT1111111111111 全局屏蔽", group="A群"), Verdict.IGNORE, "命中屏蔽词"),
+            (Message("客户", "YT1111111111111 B专属屏蔽", group="B群"), Verdict.IGNORE, "命中屏蔽词"),
+            (Message("客户", "YT1111111111111 加急", group="B群"), Verdict.AT_SERVICE, "命中@客服词"),
+            (Message("客户", "YT1111111111111 揽件", group="A群"), Verdict.FORWARD, "正常转发"),
+            (Message("客户", "YT1111111111111", is_self=True), Verdict.IGNORE, "本人消息"),
+        ]
+        for msg, want_verdict, want_reason in cases:
+            verdict, reason = classify_with_reason(msg, cfg)
+            self.assertEqual(verdict, want_verdict, msg.content)
+            self.assertIn(want_reason, reason)
+
+
 class SafeSkipMentionTests(unittest.TestCase):
     """@ 的安全失败（客服名不在群里）跳过该条继续运行，不停机。"""
 
