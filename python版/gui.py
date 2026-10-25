@@ -2,6 +2,7 @@
 """微信与圆通客户管家转发工具：配置、运行控制与实时日志。"""
 
 import copy
+import json
 import ctypes
 from datetime import datetime
 from pathlib import Path
@@ -111,6 +112,7 @@ class ConfigWindow(tk.Tk):
         self.var_kf = tk.StringVar()
         self.var_staff = tk.StringVar()
         self.var_bot = tk.StringVar()
+        self.var_kf_self = tk.StringVar()
         self.var_profile = tk.StringVar()
         self.var_poll = tk.StringVar()
         self.var_timeout = tk.StringVar()
@@ -129,6 +131,7 @@ class ConfigWindow(tk.Tk):
         self._configuration_widgets.append((self.txt_wx_groups, "normal"))
         fields = [
             ("客户管家群名", self.var_kf),
+            ("你在客户管家的显示名（多个用顿号分隔）", self.var_kf_self),
             ("被 @ 的客服名（多人用顿号分隔）", self.var_staff),
             ("机器人发送者名称", self.var_bot),
         ]
@@ -162,7 +165,7 @@ class ConfigWindow(tk.Tk):
         keywords.columnconfigure((0, 1, 2), weight=1)
         keywords.rowconfigure(1, weight=1)
         ttk.Label(keywords, text="屏蔽词（全局，一行一个）").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        ttk.Label(keywords, text="@ 客服词句（全局，一行一个）").grid(row=0, column=1, sticky="w", pady=(0, 4), padx=(12, 0))
+        ttk.Label(keywords, text="@ 客服词句（消息含这些词才提醒，一行一个）").grid(row=0, column=1, sticky="w", pady=(0, 4), padx=(12, 0))
         ttk.Label(keywords, text="按群覆盖（群名|屏蔽词|@词；空段=清空，缺段=用全局）").grid(row=0, column=2, sticky="w", pady=(0, 4), padx=(12, 0))
         self.txt_block = tk.Text(keywords, height=7, width=26, wrap="word", undo=True)
         self.txt_at = tk.Text(keywords, height=7, width=26, wrap="word", undo=True)
@@ -210,6 +213,27 @@ class ConfigWindow(tk.Tk):
         entry.grid(row=row, column=1, sticky="ew", pady=5)
         self._configuration_widgets.append((entry, "normal"))
 
+    @staticmethod
+    def _read_profile_kf_self(profile_path):
+        """读 adapter profile 里客户管家 self_names（显示名），读失败返回空。"""
+        try:
+            data = json.loads(Path(profile_path).read_text(encoding="utf-8-sig"))
+            names = data.get("kf", {}).get("self_names", [])
+            return "、".join(n.strip() for n in names if isinstance(n, str) and n.strip())
+        except (OSError, ValueError, AttributeError):
+            return ""
+
+    @staticmethod
+    def _write_profile_kf_self(profile_path, names):
+        """把显示名写回 adapter profile（原子替换），改错名不再需要删 json。"""
+        path = Path(profile_path)
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        data.setdefault("kf", {})["self_names"] = names
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                             encoding="utf-8")
+        temporary.replace(path)
+
     def _fill_form(self):
         groups = self.cfg.get("wx_groups") or (
             [self.cfg["wx_group"]] if self.cfg.get("wx_group") else [])
@@ -222,6 +246,8 @@ class ConfigWindow(tk.Tk):
             (self.var_timeout, "reset_seconds", 30),
         ):
             variable.set(self.cfg.get(key, default))
+        self.var_kf_self.set(
+            self._read_profile_kf_self(str(self.cfg.get("adapter_profile") or "")))
         self.var_wechat_accessibility.set(self.cfg.get("wechat_accessibility", False) is True)
         for widget, key in ((self.txt_block, "block_keywords"), (self.txt_at, "at_keywords")):
             widget.delete("1.0", "end")
@@ -274,6 +300,16 @@ class ConfigWindow(tk.Tk):
         if profile:
             path = Path(profile).expanduser()
             profile = str((PROJECT_DIR / path).resolve() if not path.is_absolute() else path.resolve())
+        # 客户管家显示名：表单里改了就同步写回 profile，客户不用再手改/删 json。
+        kf_self = self.var_kf_self.get().strip()
+        if profile and Path(profile).is_file() and kf_self:
+            from wechat_forwarder import split_staff
+            names = split_staff(kf_self)
+            if names and self._read_profile_kf_self(profile) != kf_self:
+                try:
+                    self._write_profile_kf_self(profile, names)
+                except OSError as exc:
+                    raise ValueError(f"客户管家显示名写入失败：{exc}") from exc
         groups = self._lines(self.txt_wx_groups)
         policies = self._parse_policies(self._lines(self.txt_policies), set(groups))
         cfg.update({
