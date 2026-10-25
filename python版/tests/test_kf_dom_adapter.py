@@ -52,6 +52,29 @@ def row(id_, sender, content, media=False):
     return {"id": id_, "sender": sender, "content": content, "media": media}
 
 
+class ComparableTests(unittest.TestCase):
+    """空格类归一比对：contenteditable 会把空格存成 U+00A0 等变体。"""
+
+    def test_nbsp_and_normal_space_equal(self):
+        from kf_dom_adapter import _comparable
+        self.assertEqual(_comparable("YT1 快递"),
+                         _comparable("YT1" + chr(0xA0) + "快递"))
+
+    def test_mention_separator_and_fullwidth_equal(self):
+        from kf_dom_adapter import _comparable
+        self.assertEqual(_comparable("a b"), _comparable("a" + chr(0x2005) + "b"))
+        self.assertEqual(_comparable("a b"), _comparable("a" + chr(0x3000) + "b"))
+
+    def test_collapsed_spaces_and_trim(self):
+        from kf_dom_adapter import _comparable
+        self.assertEqual(_comparable("a  b"), _comparable("a b"))
+        self.assertEqual(_comparable(" a b "), _comparable("a b"))
+
+    def test_newline_still_normalized(self):
+        from kf_dom_adapter import _comparable
+        self.assertEqual(_comparable("a\r\nb"), _comparable("a\nb"))
+
+
 class KfDomAdapterTests(unittest.TestCase):
     def setUp(self):
         self.cdp = FakeCdp()
