@@ -20,6 +20,7 @@ import setup_wizard
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+APP_VERSION = "2.0"   # 交付版本：每轮打包递增，客户报障时对版本
 LICENSE_CHECK_INTERVAL = 10 * 60 * 1000   # 运行期每 10 分钟复查一次卡密
 ERROR_LOG = PROJECT_DIR / "logs" / "error.log"
 
@@ -51,7 +52,7 @@ class ConfigWindow(tk.Tk):
     def __init__(self):
         initialize_dpi()
         super().__init__()
-        self.title("微信 ⇄ 圆通客户管家 · 消息转发")
+        self.title(f"微信 ⇄ 圆通客户管家 · 消息转发 v{APP_VERSION}")
         scale = max(1, self.winfo_fpixels("1i") / 96)
         self.geometry(f"{round(1000 * scale)}x{round(800 * scale)}")
         self.minsize(round(840 * scale), round(680 * scale))
@@ -645,7 +646,7 @@ class ConfigWindow(tk.Tk):
                                  "诊断包内容：界面日志（含每条消息的判定原因）、配置、"
                                  "错误日志、wechatauto 详细日志（@ 每步粘贴/候选/坐标）。\n"
                                  "不含卡密等敏感信息，可放心发给作者。\n"
-                                 f"导出时间：{_dt.now():%Y-%m-%d %H:%M:%S}\n")
+                                 f"版本 v{APP_VERSION}；导出时间：{_dt.now():%Y-%m-%d %H:%M:%S}\n")
         except OSError as exc:
             messagebox.showerror("导出失败", str(exc), parent=self)
             return
