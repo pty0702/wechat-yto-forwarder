@@ -92,10 +92,11 @@ class ForwarderTests(unittest.TestCase):
         self.assertEqual(followups, [("转人工处理", "客户群")])
         self.assertEqual(self.sent_kf, [])
 
-    def test_consumed_batch_is_retained_after_retryable_send_failure(self):
+    def test_retryable_send_failure_skips_message_and_continues(self):
+        """可重试失败同样跳过该条继续（用户策略：不阻塞下一条）。"""
         messages = [core.Message("客户", f"{WB1} 请求{index}") for index in range(3)]
         calls = []
-        failures = [False, True, False, False]
+        failures = [False, True, False]
 
         class FlakySink(core.KfSink):
             def send(self, text, group=""):
@@ -105,16 +106,16 @@ class ForwarderTests(unittest.TestCase):
 
         self.forwarder.kf_snk = FlakySink()
         self.wx.inbox = messages[:]
-        with self.assertRaises(core.RetryableSendError):
-            self.forwarder.poll_wx()
-        self.assertEqual(self.wx.inbox, [])
-        self.assertNotIn(messages[1].message_id, self.forwarder._seen_wx)
+        self.forwarder.poll_wx()          # 不抛错；第二条失败被跳过
+        self.assertEqual(calls, [messages[0].content, messages[2].content])
+        self.assertTrue(any("跳过" in line for line in self.logs))
+        # 已跳过的消息不会在下一轮重发
         self.forwarder.poll_wx()
-        self.assertEqual(calls, [message.content for message in messages])
+        self.assertEqual(len(calls), 2)
 
-    def test_retryable_reply_batch_survives_timeout_without_losing_received_replies(self):
+    def test_retryable_reply_failure_skips_reply_without_losing_queue(self):
         now = [100.0]
-        failures = [True, False, False]
+        failures = [True, False]
         delivered = []
 
         class FlakySink(core.WxSink):
@@ -129,14 +130,10 @@ class ForwarderTests(unittest.TestCase):
             self.forwarder.queue.add(WB1)
             now[0] = 110.0
             self.kf.inbox = replies
-            with self.assertRaises(core.RetryableSendError):
-                self.forwarder.poll_kf()
-            self.assertEqual(self.forwarder.queue._items[WB1][0], 100.0)
-            self.assertNotIn(replies[0].message_id, self.forwarder._seen_kf)
-            now[0] = 140.0
-            self.forwarder.poll_kf()
-        self.assertEqual(delivered, [reply.content for reply in replies])
-        self.assertTrue(self.forwarder.queue.is_empty())
+            self.forwarder.poll_kf()      # 第一条回复失败被跳过，第二条正常搬回
+        self.assertEqual(delivered, ["已完成"])
+        # 失败那条没 refresh，等待计时不变；第二条 refresh 后仍会被超时清理
+        self.assertTrue(any("跳过" in line for line in self.logs))
 
     def test_old_reply_is_read_before_new_request_can_create_pending_entry(self):
         self.kf.inbox = [core.Message("小圆", f"{WB1} 转发前已有的旧回复")]
@@ -209,7 +206,8 @@ class ForwarderTests(unittest.TestCase):
         self.forwarder.poll_kf()
         self.assertEqual(self.sent_wx, [])
 
-    def test_send_uncertainty_stops_run_and_blocks_repeated_send(self):
+    def test_send_uncertainty_skips_message_and_continues_next(self):
+        """不确定发送失败：跳过该条继续下一条，不再停机（用户策略）。"""
         sent = []
 
         class UncertainSink(core.KfSink):
@@ -218,42 +216,43 @@ class ForwarderTests(unittest.TestCase):
                 raise core.SendUncertainError("已按发送，但回执未确认")
 
         self.forwarder.kf_snk = UncertainSink()
-        self.wx.inbox = [core.Message("客户", f"{WB1} 查件")]
-        event = threading.Event()
-        with self.assertRaises(core.SendUncertainError):
-            self.forwarder.run(event)
-        self.assertTrue(event.is_set())
-        with self.assertRaises(core.SendUncertainError):
-            self.forwarder.poll_once()
-        self.assertEqual(sent, [f"{WB1} 查件"])
-        self.assertTrue(any("核对" in line for line in self.logs))
+        self.wx.inbox = [core.Message("客户", f"{WB1} 查件"),
+                         core.Message("客户", f"{WB2} 第二条")]
+        self.forwarder.poll_wx()          # 不应抛错停机
+        # 第一条失败被跳过后，第二条仍被继续处理（各尝试一次，不重发）
+        self.assertEqual(sent, [f"{WB1} 查件", f"{WB2} 第二条"])
+        self.assertTrue(any("跳过" in line and "核对" in line for line in self.logs))
 
-    def test_unclassified_send_exception_is_not_assumed_safe_to_retry(self):
+    def test_unclassified_send_exception_skips_and_continues(self):
         class UnknownSink(core.KfSink):
             def send(self, text, group=""):
                 raise OSError("发送过程中窗口关闭")
 
         self.forwarder.kf_snk = UnknownSink()
-        self.wx.inbox = [core.Message("客户", f"{WB1} 查件")]
-        with self.assertRaises(core.SendUncertainError):
-            self.forwarder.poll_wx()
+        self.wx.inbox = [core.Message("客户", f"{WB1} 查件"),
+                         core.Message("客户", f"{WB2} 第二条")]
+        self.forwarder.poll_wx()          # 未分类异常同样跳过继续
+        self.assertTrue(any("跳过" in line for line in self.logs))
 
-    def test_run_retries_explicitly_unsent_messages(self):
+    def test_run_continues_after_send_failure(self):
+        """运行中某条发送失败：跳过继续轮询，不停机（用户策略）。"""
         attempts = []
         event = threading.Event()
 
-        class RetrySink(core.KfSink):
+        class FlakyOnceSink(core.KfSink):
             def send(self, text, group=""):
                 attempts.append(text)
                 if len(attempts) == 1:
                     raise core.RetryableSendError("窗口暂不可用")
-                event.set()
+                event.set()          # 第二条成功后结束运行
 
-        self.forwarder.kf_snk = RetrySink()
+        self.forwarder.kf_snk = FlakyOnceSink()
         self.wx.inbox = [core.Message("客户", f"{WB1} 查件")]
-        self.forwarder.run(event)
-        self.assertEqual(attempts, [f"{WB1} 查件"] * 2)
-        self.assertTrue(any("待重试" in line for line in self.logs))
+        self.forwarder.poll_wx()     # 第一条失败被跳过
+        self.wx.inbox = [core.Message("客户", f"{WB2} 再查")]
+        self.forwarder.run(event)    # 第二条正常处理并结束
+        self.assertEqual(attempts, [f"{WB1} 查件", f"{WB2} 再查"])
+        self.assertTrue(any("跳过" in line for line in self.logs))
 
     def test_stop_interrupts_long_poll_wait(self):
         event = threading.Event()

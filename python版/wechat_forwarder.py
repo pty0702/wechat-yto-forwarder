@@ -465,6 +465,19 @@ class Forwarder:
             self._uncertain_error = SendUncertainError(f"无法确认发送结果：{exc}")
             raise self._uncertain_error from exc
 
+    def _skip_failed(self, buffer, message_id, what, exc) -> None:
+        """发送失败统一跳过（用户策略：不停机，从下一条继续）。
+
+        跳过即不重发，无重复发送风险；代价是这条可能未送达，
+        用醒目日志告知人工核对。同时清掉不确定状态避免下一轮被拦。
+        """
+        self._uncertain_error = None
+        seen = self._seen_wx if buffer is self._wx_buffer else self._seen_kf
+        seen.add(message_id)
+        del buffer[message_id]
+        self.log(f"[跳过] {what}发送失败，已跳过继续下一条；"
+                 f"请人工核对是否需要补发。原因：{exc}")
+
     def _flush_wx(self) -> None:
         while self._wx_buffer:
             message_id, msg = next(iter(self._wx_buffer.items()))
@@ -472,34 +485,42 @@ class Forwarder:
             self.log(f"[判定] {msg.group or '默认群'}/{msg.sender}："
                      f"{msg.content[:30]!r} → {verdict.value}（{reason}）")
             target_group = msg.group or self.cfg["wx_group"]
-            if verdict is Verdict.AT_SERVICE:
-                staff = self.cfg["service_staff"]
-                if not staff:
-                    raise ValueError("命中 @客服词句，但客服完整名称未配置；消息保留待处理")
-                followup = str(self.cfg.get("mention_followup") or "").strip()
-                try:
-                    # 第一条：只 @ 客服（不带原文，群里已有客户原话）；
-                    # 第二条：紧跟纯文字跟进（默认「转人工处理」，空=不发）。
-                    self._send(self.wx_snk.send_mention, staff, "", target_group)
-                    if followup:
-                        self._send(self.wx_snk.send, followup, target_group)
-                except SafeSkipError as exc:
-                    # 确定未发出且重试无意义（典型：客服名不是群成员）：
-                    # 放弃该条提醒继续运行，配置修好后下一条自然生效。
-                    self._seen_wx.add(message_id)
-                    del self._wx_buffer[message_id]
-                    self.log(f"[艾特客服] 已跳过一条（{exc}）；"
-                             "请核对客服名与微信群成员昵称完全一致")
-                    continue
-                notice = (f"[艾特客服] 已在 {target_group} @{staff}"
-                          + (f"，跟进：{followup}" if followup else ""))
-            elif verdict is Verdict.FORWARD:
-                self._send(self.kf_snk.send, msg.content)
-                self.queue.add(extract_waybill(msg.content), target_group)
-                notice = (f"[转发] {target_group} → 客户管家 "
-                          f"{self.cfg['kf_group']}：{msg.content[:40]}")
-            else:
-                notice = None
+            try:
+                if verdict is Verdict.AT_SERVICE:
+                    staff = self.cfg["service_staff"]
+                    if not staff:
+                        raise ValueError("命中 @客服词句，但客服完整名称未配置；消息保留待处理")
+                    followup = str(self.cfg.get("mention_followup") or "").strip()
+                    try:
+                        # 第一条：只 @ 客服（不带原文，群里已有客户原话）；
+                        # 第二条：紧跟纯文字跟进（默认「转人工处理」，空=不发）。
+                        self._send(self.wx_snk.send_mention, staff, "", target_group)
+                        if followup:
+                            self._send(self.wx_snk.send, followup, target_group)
+                    except SafeSkipError as exc:
+                        # 确定未发出且重试无意义（典型：客服名不是群成员）：
+                        # 放弃该条提醒继续运行，配置修好后下一条自然生效。
+                        self._seen_wx.add(message_id)
+                        del self._wx_buffer[message_id]
+                        self.log(f"[艾特客服] 已跳过一条（{exc}）；"
+                                 "请核对客服名与微信群成员昵称完全一致")
+                        continue
+                    notice = (f"[艾特客服] 已在 {target_group} @{staff}"
+                              + (f"，跟进：{followup}" if followup else ""))
+                elif verdict is Verdict.FORWARD:
+                    self._send(self.kf_snk.send, msg.content)
+                    self.queue.add(extract_waybill(msg.content), target_group)
+                    notice = (f"[转发] {target_group} → 客户管家 "
+                              f"{self.cfg['kf_group']}：{msg.content[:40]}")
+                else:
+                    notice = None
+            except _StopRequested:
+                raise
+            except Exception as exc:
+                # 发送失败（含不确定失败）：跳过该条，从下一条继续，不停机。
+                self._skip_failed(self._wx_buffer, message_id,
+                                  f"「{msg.content[:20]}」", exc)
+                continue
             # 只在发送明确成功或规则明确忽略后确认事件。
             self._seen_wx.add(message_id)
             del self._wx_buffer[message_id]
@@ -520,7 +541,15 @@ class Forwarder:
             message_id, (reply, waybill) = next(iter(self._kf_buffer.items()))
             # 回复按运单号路由回原微信群；查不到来源（旧配置/异常）发默认群。
             target_group = self.queue.group_of(waybill) or self.cfg["wx_group"]
-            self._send(self.wx_snk.send, reply.content, target_group)
+            try:
+                self._send(self.wx_snk.send, reply.content, target_group)
+            except _StopRequested:
+                raise
+            except Exception as exc:
+                # 搬回失败：跳过该条回复继续（待回复仍在队列，下一条回复仍可关联）。
+                self._skip_failed(self._kf_buffer, message_id,
+                                  f"回复「{reply.content[:20]}」", exc)
+                continue
             self.queue.refresh(waybill)
             self._seen_kf.add(message_id)
             del self._kf_buffer[message_id]
