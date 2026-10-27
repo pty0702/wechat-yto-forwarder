@@ -68,6 +68,28 @@ class _Cdp:
             websockets.connect(page["webSocketDebuggerUrl"], max_size=20_000_000))
 
     def evaluate(self, expression):
+        try:
+            return self._evaluate_once(expression)
+        except Exception as exc:
+            # 客户管家空闲/重启会断开 websocket（ConnectionClosed 等）：
+            # 丢弃坏连接重建一次。断连不重连会让后续所有调用持续失败
+            # 直到重启软件（客户诊断包实测）。
+            if "websockets" not in type(exc).__module__ and not isinstance(exc, OSError):
+                raise
+            self._drop_connection()
+            return self._evaluate_once(expression)
+
+    def _drop_connection(self):
+        ws = self._ws
+        self._ws = None
+        if ws is None:
+            return
+        try:
+            self._loop.run_until_complete(ws.close())
+        except Exception:
+            pass
+
+    def _evaluate_once(self, expression):
         self._connect()
         self._msg_id += 1
         payload = json.dumps({
@@ -89,6 +111,15 @@ class _Cdp:
         raise AdapterConfigurationError("CDP 执行超时")
 
     def insert_text(self, text):
+        try:
+            return self._insert_text_once(text)
+        except Exception as exc:
+            if "websockets" not in type(exc).__module__ and not isinstance(exc, OSError):
+                raise
+            self._drop_connection()
+            return self._insert_text_once(text)
+
+    def _insert_text_once(self, text):
         self._connect()
         self._msg_id += 1
         self._loop.run_until_complete(self._ws.send(json.dumps({
@@ -231,21 +262,45 @@ class KfDomAdapter:
             " if (!el) return false; el.focus(); return document.activeElement === el; })()")
         if not focus_ok:
             raise AdapterConfigurationError("客户管家输入框无法获得焦点")
-        cdp.insert_text(text)
-        # 本机实测（2026-10-24）：该 Vue 版输入框靠 keyup 同步发送按钮状态，
-        # 只派 input 事件按钮不启用；两个事件都派发才稳定。
-        cdp.evaluate(
-            "(() => { const el = document.getElementById('edit-content');"
-            " el.dispatchEvent(new Event('input', {bubbles: true}));"
-            " el.dispatchEvent(new Event('keyup', {bubbles: true})); return true; })()")
-        draft = str(cdp.evaluate(
-            "(() => { const el = document.getElementById('edit-content');"
-            " return el ? (el.innerText || '') : ''; })()") or "")
+        text_js = json.dumps(text, ensure_ascii=False)
+        draft = ""
+        # 诊断包实测（2026-10-27）：客户管家窗口在后台时 CDP Input.insertText
+        # 静默失效（回读 0 字）。三级降级，每级插完派 input+keyup 并回读校验：
+        # 1) CDP insertText；2) 页面内 execCommand（不依赖窗口前台，原生 input）；
+        # 3) DOM 直写（最后手段）。
+        for step in ("insertText", "execCommand", "domWrite"):
+            if step == "insertText":
+                cdp.insert_text(text)
+            elif step == "execCommand":
+                cdp.evaluate(
+                    "(() => { const el = document.getElementById('edit-content');"
+                    " if (!el) return false; el.focus();"
+                    " el.innerText = '';"
+                    " el.dispatchEvent(new Event('input', {bubbles: true}));"
+                    " return document.execCommand('insertText', false, " + text_js + "); })()")
+            else:
+                cdp.evaluate(
+                    "(() => { const el = document.getElementById('edit-content');"
+                    " if (!el) return false; el.innerText = " + text_js + ";"
+                    " el.dispatchEvent(new Event('input', {bubbles: true}));"
+                    " return true; })()")
+            # 本机实测（2026-10-24）：该 Vue 版输入框靠 keyup 同步发送按钮状态，
+            # 只派 input 事件按钮不启用；两个事件都派发才稳定。
+            cdp.evaluate(
+                "(() => { const el = document.getElementById('edit-content');"
+                " el.dispatchEvent(new Event('input', {bubbles: true}));"
+                " el.dispatchEvent(new Event('keyup', {bubbles: true})); return true; })()")
+            draft = str(cdp.evaluate(
+                "(() => { const el = document.getElementById('edit-content');"
+                " return el ? (el.innerText || '') : ''; })()") or "")
+            if _comparable(draft) == _comparable(text):
+                break
+            self.log(f"[适配] 客户管家输入方式 {step} 未生效（回读 {len(draft)} 字），尝试下一级")
         if _comparable(draft) != _comparable(text):
-            raise AdapterConfigurationError(
+            raise RetryableSendError(
                 f"输入结果与原文不同（原文 {len(text)} 字，回读 {len(draft)} 字"
                 f"：{draft[:40]!r}），已保留草稿，未提交发送；"
-                "常见原因：中文输入法处于组合状态，请切英文输入法后重试")
+                "常见原因：客户管家窗口被最小化或后台过久，请保持其前台打开")
         if cdp.evaluate(
                 "(() => { const b = document.querySelector('button.send-btn');"
                 " return !b || b.disabled; })()"):

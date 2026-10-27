@@ -90,10 +90,14 @@ DEFAULT_CONFIG = {
 
 
 def split_staff(staff: str) -> List[str]:
-    """客服名单拆分：顿号/英文逗号/中文逗号/分号分隔，去空去重保序。"""
+    """客服名单拆分：顿号/逗号/分号/句号分隔，去空去重保序。
+
+    句号是客户实测高频写法（「圆通客服。出港客服-嘉莉」意为两人）；
+    中文昵称含句号极罕见，误拆风险小于整串当一个人名导致 @ 全失败。
+    """
     if not isinstance(staff, str):
         return []
-    parts = re.split(r"[、，,；;]", staff)
+    parts = re.split(r"[、，,；;。]", staff)
     return list(dict.fromkeys(p.strip() for p in parts if p.strip()))
 
 
