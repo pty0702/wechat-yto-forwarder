@@ -207,7 +207,17 @@ class WechatDbAdapter:
                     matched = expected in _comparable(msg.content) and all(
                         _comparable(s) in _comparable(msg.content) for s in staff_list)
                 else:
-                    matched = _comparable(msg.content) == _comparable(text)
+                    content_cmp = _comparable(msg.content)
+                    matched = content_cmp == expected
+                    if not matched and expected:
+                        # 降级包含匹配：微信可能对内容做无害归一（剥零宽字符等）。
+                        # 运单号+发送文本前 20 字符双命中才认定，误匹配风险极低。
+                        from wechat_forwarder import extract_waybill
+                        waybill = extract_waybill(text)
+                        head = expected[:20]
+                        matched = (waybill is not None
+                                   and waybill in content_cmp
+                                   and head in content_cmp)
                 if matched:
                     self._since[name] = max(self._since.get(name, 0),
                                             int(row.get("sort_seq") or 0))
@@ -215,11 +225,13 @@ class WechatDbAdapter:
                         self._since_seq = self._since[name]
                     return
             time.sleep(0.4)
-        # 库确认失败：采集现场证据（输入框残留草稿 + 库内最近一条本人消息），
-        # 区分「没发出去」「发到别处」「落库延迟」三种可能，远程日志即可定位。
+        # 库确认失败：采集现场证据（待发文本字符级转储 + 输入框残留草稿 +
+        # 库内最近一条本人消息），区分「特殊字符不匹配」「没发出去」「发到
+        # 别处」「落库延迟」，远程日志即可定位。
         residual, last_self = self._collect_failure_evidence(db, chat_id)
         raise SendUncertainError(
             "发送后未在微信数据库确认到本账号消息，已跳过；"
+            f"待发文本repr={text[:80]!r}（特殊字符会现形）；"
             f"输入框残留草稿={residual!r}（空=可能已发出或粘贴丢失）；"
             f"库内最近本人消息={last_self!r}；请勿手动重发，先看群核对")
 
