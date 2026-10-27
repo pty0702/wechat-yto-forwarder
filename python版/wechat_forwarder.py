@@ -288,9 +288,8 @@ def classify_with_reason(msg: Message, cfg: dict):
         return Verdict.IGNORE, "图片/语音等媒体占位"
     if not starts_with_waybill(msg.content):
         return Verdict.IGNORE, "不以 YT+单号开头"
-    waybills = extract_waybills(msg.content)
-    if len(waybills) >= 2:
-        return Verdict.IGNORE, f"一条消息含 {len(waybills)} 个单号（一次只处理一单），已忽略"
+    # 用户策略（2026-10-27）：YT 开头一律转发，不限制单号个数——多单连发
+    # 也要进客服群让小圆逐个处理，不能因多单而丢弃。
     policy = cfg.get("group_policies", {}).get(msg.group) or {}
     block_words = policy.get("block_keywords", cfg.get("block_keywords", []))
     at_words = policy.get("at_keywords", cfg.get("at_keywords", []))
