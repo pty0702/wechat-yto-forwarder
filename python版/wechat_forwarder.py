@@ -249,7 +249,7 @@ WAYBILL_RE = re.compile(r"YT[0-9]{10,15}(?![0-9])", re.IGNORECASE)
 
 
 def starts_with_waybill(text: str) -> bool:
-    """消息是否以 YT 单号开头（允许前导空白）。"""
+    """兼容保留：消息是否以 YT 单号开头。"""
     return bool(WAYBILL_RE.match(text.lstrip()))
 
 
@@ -286,8 +286,8 @@ def classify_with_reason(msg: Message, cfg: dict):
         return Verdict.IGNORE, f"非文本消息（{msg.kind}）"
     if _is_media(msg.content):
         return Verdict.IGNORE, "图片/语音等媒体占位"
-    if not starts_with_waybill(msg.content):
-        return Verdict.IGNORE, "不以 YT+单号开头"
+    if not starts_with_waybill(msg.content) and not WAYBILL_RE.search(msg.content):
+        return Verdict.IGNORE, "消息中无 YT+单号"
     # 用户策略（2026-10-27）：YT 开头一律转发，不限制单号个数——多单连发
     # 也要进客服群让小圆逐个处理，不能因多单而丢弃。
     policy = cfg.get("group_policies", {}).get(msg.group) or {}

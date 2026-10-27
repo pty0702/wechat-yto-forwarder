@@ -64,9 +64,9 @@ class ForwarderTests(unittest.TestCase):
             (core.Message("客户", f"{WB1} 查件"), core.Verdict.FORWARD),
             (core.Message("本人", f"{WB1} 查件", is_self=True), core.Verdict.IGNORE),
             (core.Message("客户", f"{WB1} 图片标题", kind="image"), core.Verdict.IGNORE),
-            (core.Message("客户", f"查询 {WB1}"), core.Verdict.IGNORE),
+            (core.Message("客户", f"查询 {WB1}"), core.Verdict.FORWARD),
             (core.Message("客户", "[图片]"), core.Verdict.IGNORE),
-            (core.Message("客户", "YT1234567890123456 查件"), core.Verdict.IGNORE),
+            (core.Message("客户", "没有单号的闲聊"), core.Verdict.IGNORE),
         ]
         for message, expected in cases:
             with self.subTest(content=message.content, kind=message.kind):

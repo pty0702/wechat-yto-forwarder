@@ -146,7 +146,10 @@ class ClassifyReasonTests(unittest.TestCase):
         from wechat_forwarder import classify_with_reason, Verdict
         cfg = cfg_two_groups()
         cases = [
-            (Message("客户", "大家好"), Verdict.IGNORE, "不以 YT"),
+            (Message("客户", "大家好"), Verdict.IGNORE, "消息中无 YT"),
+            # 用户策略：YT 单号在消息中间也处理（前面加词不影响识别）
+            (Message("客户", "帮查一下 YT1111111111111 到哪了"), Verdict.FORWARD, "正常转发"),
+            (Message("客户", "麻烦了 YT1111111111111 加急"), Verdict.AT_SERVICE, "命中@客服词"),
             (Message("客户", "YT1111111111111 全局屏蔽", group="A群"), Verdict.IGNORE, "命中屏蔽词"),
             (Message("客户", "YT1111111111111 B专属屏蔽", group="B群"), Verdict.IGNORE, "命中屏蔽词"),
             (Message("客户", "YT1111111111111 加急", group="B群"), Verdict.AT_SERVICE, "命中@客服词"),
