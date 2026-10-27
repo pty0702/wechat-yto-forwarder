@@ -215,8 +215,34 @@ class WechatDbAdapter:
                         self._since_seq = self._since[name]
                     return
             time.sleep(0.4)
+        # 库确认失败：采集现场证据（输入框残留草稿 + 库内最近一条本人消息），
+        # 区分「没发出去」「发到别处」「落库延迟」三种可能，远程日志即可定位。
+        residual, last_self = self._collect_failure_evidence(db, chat_id)
         raise SendUncertainError(
-            "发送后未在微信数据库确认到本账号消息，请人工核对；已停止，避免重复发送")
+            "发送后未在微信数据库确认到本账号消息，已跳过；"
+            f"输入框残留草稿={residual!r}（空=可能已发出或粘贴丢失）；"
+            f"库内最近本人消息={last_self!r}；请勿手动重发，先看群核对")
+
+    def _collect_failure_evidence(self, db, chat_id):
+        """失败现场取证：输入框残留（UIA）与库内最近一条本人消息。"""
+        residual = None
+        try:
+            uia = self._wechat_gui()._get_uia()
+            if uia is not None:
+                ctrl = uia._chat_input()
+                if ctrl is not None:
+                    residual = uia._read_edit_value(ctrl)
+        except Exception:
+            residual = None
+        last_self = None
+        try:
+            for row in db.get_messages(chat_id, limit=30):
+                if str(row.get("sender_username") or "") == db.wxid:
+                    last_self = (row.get("content") or "")[:60]
+                    break
+        except Exception:
+            pass
+        return residual, last_self
 
     def send(self, text, group=""):
         self._send(text, group=group)
