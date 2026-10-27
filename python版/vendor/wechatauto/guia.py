@@ -2021,8 +2021,23 @@ class WeChatGUI:
                     clicked = True
                     break
             if not clicked:
-                # 本项目修改：微信 4.x 发送按钮常为纯图标无文字，OCR 认不出；
-                # 直接点布局校准出的发送按钮区域中心。
+                # 本项目修改：客户可能把微信设成「回车=换行」，回车永远发不出
+                # （表现为输入框有字但卡住不动，直到手动点发送）。按钮兜底
+                # 两级：UIA 精确定位「发送」按钮坐标 → 校准区域中心。
+                uia = self._get_uia()
+                if uia is not None:
+                    try:
+                        btn = uia._win.ButtonControl(SubName='发送')
+                        if btn.Exists(0.5, 0.2):
+                            r = btn.BoundingRectangle
+                            px, py = rhythm.point((r.left, r.top, r.right, r.bottom))
+                            self.wx_click(px, py)
+                            clicked = True
+                            wxlog.info('回车未发送，已点 UIA 发送按钮 (%d,%d)', px, py)
+                    except Exception as exc:
+                        wxlog.debug(f'UIA 发送按钮定位失败：{exc!r}')
+            if not clicked:
+                # 微信 4.x 发送按钮常为纯图标无文字，OCR 认不出时点校准区域中心。
                 x0, y0, x1, y1 = self.send_button_region
                 px, py = rhythm.point((self.origin_x + x0, self.origin_y + y0,
                                        self.origin_x + x1, self.origin_y + y1))
