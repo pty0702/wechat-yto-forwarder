@@ -255,6 +255,12 @@ def extract_waybill(text: str) -> Optional[str]:
     return m.group().upper() if m else None
 
 
+def extract_waybills(text: str) -> List[str]:
+    """提取消息中的全部运单号。多单连体（一次挤 N 个单号）时小圆只能
+    错切解析、回复单号与队列对不上导致搬回失效——这类消息按忽略处理。"""
+    return [m.group().upper() for m in WAYBILL_RE.finditer(text)]
+
+
 def hit_any(text: str, keywords: List[str]) -> bool:
     return any(kw and kw.strip() and kw.strip() in text for kw in keywords)
 
@@ -278,6 +284,9 @@ def classify_with_reason(msg: Message, cfg: dict):
         return Verdict.IGNORE, "图片/语音等媒体占位"
     if not starts_with_waybill(msg.content):
         return Verdict.IGNORE, "不以 YT+单号开头"
+    waybills = extract_waybills(msg.content)
+    if len(waybills) >= 2:
+        return Verdict.IGNORE, f"一条消息含 {len(waybills)} 个单号（一次只处理一单），已忽略"
     policy = cfg.get("group_policies", {}).get(msg.group) or {}
     block_words = policy.get("block_keywords", cfg.get("block_keywords", []))
     at_words = policy.get("at_keywords", cfg.get("at_keywords", []))
@@ -291,23 +300,8 @@ def classify_with_reason(msg: Message, cfg: dict):
 
 
 def classify(msg: Message, cfg: dict) -> Verdict:
-    """方向① 的核心判定：按 屏蔽词 → @客服词 → 正常转发 的顺序。
-
-    多群模式下优先用 group_policies[msg.group] 覆盖的词表，未覆盖的群
-    用全局 block_keywords / at_keywords。
-    """
-    if msg.is_self or msg.kind != "text" or _is_media(msg.content):
-        return Verdict.IGNORE
-    if not starts_with_waybill(msg.content):
-        return Verdict.IGNORE          # 不带 YT 开头：图片、闲聊等一律忽略
-    policy = cfg.get("group_policies", {}).get(msg.group) or {}
-    block_words = policy.get("block_keywords", cfg.get("block_keywords", []))
-    at_words = policy.get("at_keywords", cfg.get("at_keywords", []))
-    if hit_any(msg.content, block_words):
-        return Verdict.IGNORE          # 命中屏蔽词：装作没看见
-    if hit_any(msg.content, at_words):
-        return Verdict.AT_SERVICE      # 命中 @客服词句：微信群 @客服
-    return Verdict.FORWARD             # 正常转发客户管家
+    """方向① 的核心判定（详细原因见 classify_with_reason，二者同源）。"""
+    return classify_with_reason(msg, cfg)[0]
 
 
 # ---------------------------------------------------------------------------

@@ -30,8 +30,9 @@ hidden = [
 a = Analysis(
     [str(pydir / "gui.py")],
     pathex=[str(pydir), str(vendor)],
-    binaries=[],
-    datas=[],
+    # vendor 以真实文件随包分发（不依赖 PYZ 静态收集——曾静默丢 wechatauto.guia
+    # 导致打包版搬回全线失败），运行时 wechat_db_adapter 的 sys.path 注入必然命中。
+    datas=[(str(vendor), "vendor")],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

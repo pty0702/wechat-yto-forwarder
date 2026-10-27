@@ -152,6 +152,12 @@ class ClassifyReasonTests(unittest.TestCase):
             (Message("客户", "YT1111111111111 加急", group="B群"), Verdict.AT_SERVICE, "命中@客服词"),
             (Message("客户", "YT1111111111111 揽件", group="A群"), Verdict.FORWARD, "正常转发"),
             (Message("客户", "YT1111111111111", is_self=True), Verdict.IGNORE, "本人消息"),
+            (Message("客户", "YT1111111111111YT2222222222222拦截"), Verdict.IGNORE, "2 个单号"),
+            (Message("客户", "YT1111111111111YT2222222222222YT3333333333333拦截"),
+             Verdict.IGNORE, "3 个单号"),
+            (Message("客户", "YT1111111111111\nYT2222222222222\nYT3333333333333"
+                             "\nYT4444444444444\nYT5555555555555拦截"),
+             Verdict.IGNORE, "5 个单号"),
         ]
         for msg, want_verdict, want_reason in cases:
             verdict, reason = classify_with_reason(msg, cfg)
