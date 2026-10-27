@@ -2756,10 +2756,10 @@ class WeChatGUI:
             py = self.origin_y + target[1]
             if px < self.origin_x + self.right_pane_left + 50 or py > self.origin_y + box_top:
                 return abort(f'候选坐标异常（{px},{py}），不在弹层区，已停止发送')
-        wxlog.info('@ 点击候选「%s」坐标=(%d,%d)', member, px, py)
-        self.wx_click(px, py)
-        time.sleep(0.5)
-        # 点候选是全程唯一可能切走会话的操作，点完立刻核对会话。
+            wxlog.info('@ 点击候选「%s」坐标=(%d,%d)', member, px, py)
+            self.wx_click(px, py)
+            time.sleep(0.5)
+            # 点候选是全程唯一可能切走会话的操作，点完立刻核对会话。
             if who and not self._chat_is_open(who):
                 return abort('点击候选后会话被切走，已停止发送')
             # 本项目修改：@ 选中后整个提及对象在输入框里是一个 U+FFFC 内嵌对象
