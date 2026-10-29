@@ -90,22 +90,68 @@ class WechatDbAdapter:
     # ------------------------------------------------------------------
     # 读取
     # ------------------------------------------------------------------
+    def _rematch_renamed(self, db, name):
+        """群名在微信里找不到时的改名模糊匹配（双向包含，唯一候选才绑定）。
+
+        客户在微信里改群名后（如「沭阳圆通售后群路晓燕」→「沭阳圆通售后群」），
+        配置旧名自动跟上，不需要客户重新配置。群备注同样参与匹配（客户给群
+        设置的备注不随别人改群名变化）。候选多于一个时不猜，返回 None
+        由调用方给出友好报错。
+        """
+        try:
+            rooms = db.list_chatrooms()
+        except Exception:
+            return None
+        candidates = []
+        for r in rooms:
+            names = {r.get("name") or "", r.get("remark") or ""} - {""}
+            if any(n != name and (n in name or name in n) for n in names):
+                candidates.append(r)
+        if len(candidates) != 1:
+            return None
+        return candidates[0]
+
     def prepare(self):
         db = self._wechat_db()
         if not self.groups:
             raise AdapterConfigurationError("微信数据库适配器没有配置任何群")
+        renamed_hints = []
         for name in self.groups:
             chat_id = db.group_name_to_id(name)
+            actual_name = name
             if not chat_id:
-                raise AdapterConfigurationError(f"微信数据库中找不到目标群：{name}")
-            self._chats[name] = chat_id
-            self._confirm_chats[name] = chat_id
+                matched = self._rematch_renamed(db, name)
+                if matched:
+                    actual_name = matched["name"]
+                    chat_id = matched["username"]
+                    renamed_hints.append(f"「{name}」→「{actual_name}」")
+                else:
+                    raise AdapterConfigurationError(
+                        f"微信里找不到群「{name}」——如果这个群改过名，"
+                        "请在主界面「微信群列表」里改成现在的群名后保存")
+            self._chats[actual_name] = chat_id
+            self._confirm_chats[actual_name] = chat_id
             rows = db.get_messages(chat_id, limit=1)
-            self._since[name] = rows[0]["sort_seq"] if rows else 0
+            self._since[actual_name] = rows[0]["sort_seq"] if rows else 0
+        # 绑定到实际群名：后续 fetch 打来源标签、send 定向都用实际名
+        self.groups = [self._chats_key(g) for g in self.groups]
+        self.group = self.groups[0] if self.groups else ""
         self._chat_id = self._chats[self.group] if self.group else None
         self._since_seq = self._since.get(self.group, 0)
         self.log(f"[适配] 微信数据库已绑定 {'、'.join(self.groups)}，"
                  f"基线 {self._since}")
+        for hint in renamed_hints:
+            self.log(f"[适配] 检测到群改名，已自动匹配：{hint}；"
+                     "建议有空在主界面「微信群列表」里更新为新群名")
+
+    def _chats_key(self, name):
+        """配置名 → 绑定时用的实际名（改名自动匹配后的）。"""
+        if name in self._chats:
+            return name
+        for actual in self._chats:
+            if actual in name or name in actual:
+                return actual
+        return name
 
     def fetch_new(self):
         if not self._chats:

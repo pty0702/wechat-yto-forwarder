@@ -194,5 +194,39 @@ class SafeSkipMentionTests(unittest.TestCase):
         self.assertEqual(sink.mentions, [])
 
 
+class RenameRematchTests(unittest.TestCase):
+    """微信群改名后配置自动跟上（双向包含、唯一候选才绑定）。"""
+
+    def _adapter_with_rooms(self, rooms):
+        from wechat_db_adapter import WechatDbAdapter
+        adapter = WechatDbAdapter({"self_names": ["我"]}, "沭阳圆通售后群路晓燕",
+                                  log=lambda *_: None, db=object(), gui=object())
+        class _Db:
+            def list_chatrooms(self):
+                return rooms
+        return adapter, _Db()
+
+    def test_unique_candidate_binds(self):
+        adapter, db = self._adapter_with_rooms([
+            {"username": "1@chatroom", "name": "潼阳圆通出港群"},
+            {"username": "2@chatroom", "name": "沭阳圆通售后群"},
+        ])
+        self.assertEqual(adapter._rematch_renamed(db, "沭阳圆通售后群路晓燕"),
+                         {"username": "2@chatroom", "name": "沭阳圆通售后群"})
+
+    def test_multiple_candidates_not_guessed(self):
+        adapter, db = self._adapter_with_rooms([
+            {"username": "2@chatroom", "name": "沭阳圆通售后群A"},
+            {"username": "3@chatroom", "name": "沭阳圆通售后群B"},
+        ])
+        self.assertIsNone(adapter._rematch_renamed(db, "沭阳圆通售后群"))
+
+    def test_same_name_not_a_rename(self):
+        adapter, db = self._adapter_with_rooms([
+            {"username": "2@chatroom", "name": "沭阳圆通售后群路晓燕"},
+        ])
+        self.assertIsNone(adapter._rematch_renamed(db, "沭阳圆通售后群路晓燕"))
+
+
 if __name__ == "__main__":
     unittest.main()

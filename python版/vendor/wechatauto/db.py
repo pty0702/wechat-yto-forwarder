@@ -2441,17 +2441,39 @@ class WeChatDB:
             })
         return groups
 
-    def group_name_to_id(self, name: str) -> Optional[str]:
-        """按群名查找群 wxid（形如 ``xxx@chatroom``）；找不到返回 None。
+    def list_chatrooms(self) -> List[dict]:
+        """列出全部群聊 ``[{username, name, remark}]``。
 
-        精确匹配优先，其次做「子串包含」的宽松匹配（可能返回多个，取第一个）。
+        本项目修改：群改名模糊匹配用；name 是群名，remark 是客户设置的
+        备注（设置备注后别人改群名不影响备注，匹配时两个都认）。
+        """
+        conn = self._contact_conn()
+        if not conn:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT username, nick_name, remark FROM contact "
+                "WHERE username LIKE '%@chatroom'").fetchall()
+        finally:
+            conn.close()
+        return [{"username": r["username"],
+                 "name": (r["nick_name"] or r["username"]).strip(),
+                 "remark": (r["remark"] or "").strip()}
+                for r in rows]
+
+    def group_name_to_id(self, name: str) -> Optional[str]:
+        """按群名或群备注查找群 wxid（形如 ``xxx@chatroom``）；找不到返回 None。
+
+        精确匹配优先（群名或备注），其次「子串包含」的宽松匹配。
+        本项目修改：支持备注——客户给群设置备注后，别人改群名不影响
+        备注名，按备注配置可免疫改名（备注显示优先级高于群名）。
         """
         conn = self._contact_conn()
         if not conn:
             return None
         try:
             rows = conn.execute(
-                "SELECT username, nick_name FROM contact "
+                "SELECT username, nick_name, remark FROM contact "
                 "WHERE username LIKE '%@chatroom'").fetchall()
         finally:
             conn.close()
@@ -2459,9 +2481,10 @@ class WeChatDB:
         fuzzy = []
         for r in rows:
             nm = r["nick_name"] or r["username"]
-            if nm == name:
+            rm = (r["remark"] or "").strip()
+            if nm == name or (rm and rm == name):
                 exact = r["username"]
-            elif name and name in nm:
+            elif name and (name in nm or (rm and name in rm)):
                 fuzzy.append(r["username"])
             elif nm == r["username"] and name in nm:  # 无群名时按 username 兜底
                 fuzzy.append(r["username"])
