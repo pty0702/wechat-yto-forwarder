@@ -1580,13 +1580,13 @@ class WeChatGUI:
             x0 = max(0, self.right_pane_left - 60)
             res = self.ocr_zoomed((x0, 0, self.render_w, 185), scale=3)
             title = ''.join(t.strip() for t, x, y, w, h in res)
-            if len(name) >= 3:
-                frags = (name[1:3], name[2:4], name[-2:], name[:2])
-            else:
-                frags = (name,)
-            return any(f and f in title for f in frags)
+            # 2026-10-28 收紧：原「名称片段 in 标题」匹配——「沭阳圆通售后群」
+            # 提取出「圆通」片段即可命中任何圆通群，导致微信停在错群后所有
+            # 回复连锁搬进错群。与 UIA 分支一致只认全等；OCR 识别不全时
+            # 宁可拒发跳过，不可错发。
+            return title == name
         except Exception as exc:
-            wxlog.debug(f'标题片段匹配失败：{exc!r}')
+            wxlog.debug(f'标题匹配失败：{exc!r}')
             return False
 
     def _typed_into_chat_input(self, expect: str) -> bool:

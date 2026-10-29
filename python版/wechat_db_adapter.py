@@ -228,24 +228,28 @@ class WechatDbAdapter:
         # 库确认失败：采集现场证据（待发文本字符级转储 + 输入框残留草稿 +
         # 库内最近一条本人消息），区分「特殊字符不匹配」「没发出去」「发到
         # 别处」「落库延迟」，远程日志即可定位。
-        residual, last_self = self._collect_failure_evidence(db, chat_id)
+        residual, last_self, current = self._collect_failure_evidence(db, chat_id)
         raise SendUncertainError(
             "发送后未在微信数据库确认到本账号消息，已跳过；"
+            f"当前微信会话={current!r}（≠目标群即发错群）；"
             f"待发文本repr={text[:80]!r}（特殊字符会现形）；"
             f"输入框残留草稿={residual!r}（空=可能已发出或粘贴丢失）；"
             f"库内最近本人消息={last_self!r}；请勿手动重发，先看群核对")
 
     def _collect_failure_evidence(self, db, chat_id):
-        """失败现场取证：输入框残留（UIA）与库内最近一条本人消息。"""
+        """失败现场取证：当前会话名 + 输入框残留 + 库内最近一条本人消息。"""
+        current = None
         residual = None
         try:
-            uia = self._wechat_gui()._get_uia()
+            gui = self._wechat_gui()
+            uia = gui._get_uia()
             if uia is not None:
+                current = uia.current_chat()
                 ctrl = uia._chat_input()
                 if ctrl is not None:
                     residual = uia._read_edit_value(ctrl)
         except Exception:
-            residual = None
+            current = residual = None
         last_self = None
         try:
             for row in db.get_messages(chat_id, limit=30):
@@ -254,7 +258,7 @@ class WechatDbAdapter:
                     break
         except Exception:
             pass
-        return residual, last_self
+        return residual, last_self, current
 
     def send(self, text, group=""):
         self._send(text, group=group)
