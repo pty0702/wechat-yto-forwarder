@@ -20,7 +20,7 @@ import setup_wizard
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-APP_VERSION = "2.3"   # 交付版本：每轮打包递增，客户报障时对版本
+APP_VERSION = "2.4"   # 交付版本：每轮打包递增，客户报障时对版本
 LICENSE_CHECK_INTERVAL = 10 * 60 * 1000   # 运行期每 10 分钟复查一次卡密
 ERROR_LOG = PROJECT_DIR / "logs" / "error.log"
 
