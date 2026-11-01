@@ -6,7 +6,12 @@ import traceback
 import ctypes
 from typing import List, Optional, Sequence, Tuple, Union
 
-import win32ui
+# 本项目修改：win32ui 仅 capture()（窗口截图，转发主链路不用）需要，
+# 且它依赖系统 MFC DLL——打包绿色版不带这些也能跑主链路，改为可选导入。
+try:
+    import win32ui
+except ImportError:
+    win32ui = None
 import win32gui
 import win32api
 import win32con
@@ -77,6 +82,8 @@ def GetVersionByPath(file_path) -> Optional[str]:
 
 def capture(hwnd, bbox) -> Image.Image:
     """截取指定窗口的指定区域，返回 PIL 图像"""
+    if win32ui is None:
+        raise RuntimeError('窗口截图功能需要 win32ui 模块（当前环境未提供）')
     window_rect = win32gui.GetWindowRect(hwnd)
     win_left, win_top, win_right, win_bottom = window_rect
     win_width = win_right - win_left
