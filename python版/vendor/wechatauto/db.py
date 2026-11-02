@@ -449,7 +449,8 @@ def _get_zstd_module():
     """
     global _ZSTD_MODULE
     if _ZSTD_MODULE is not None:
-        return _ZSTD_MODULE
+        # False 表示「已确认缺失」：归一成 None，调用方 `is not None` 才判得对
+        return _ZSTD_MODULE or None
     for mod_name in ("zstandard", "zstd"):
         try:
             _ZSTD_MODULE = __import__(mod_name)
@@ -474,6 +475,30 @@ def _zstd_decompress(zstd, content: bytes) -> Optional[str]:
     except Exception:
         return None
 
+
+_ZSTD_DEGRADE_WARNED = False
+
+
+def _warn_zstd_text_degraded_once(missing_module: bool) -> None:
+    """长文本正文解压失败、退化为「[类型]」占位符时，醒目警告一次。
+
+    多单号长消息（批量改地址文本）正是以 zstd 帧存储；缺库或解压失败时
+    这些消息在业务层会全部「不识别、不转发」，必须暴露而不是静默吞掉。
+    只警告一次，避免每条长消息刷屏。
+    """
+    global _ZSTD_DEGRADE_WARNED
+    if _ZSTD_DEGRADE_WARNED:
+        return
+    _ZSTD_DEGRADE_WARNED = True
+    if missing_module:
+        wxlog.warning(
+            "检测到 zstd 压缩的长文本消息，但缺少 zstandard 库无法解压：正文退化为"
+            "「[类型]」占位符，长消息（如多单号改地址）将不被识别转发！"
+            "请安装：pip install zstandard")
+    else:
+        wxlog.warning(
+            "检测到 zstd 压缩的长文本消息，但解压失败：正文退化为「[类型]」占位符，"
+            "该消息可能无法识别转发（zstandard 已安装，请反馈此警告以便排查）")
 
 
 def _find_account_dirs(db_dir: str) -> List[str]:
@@ -2206,10 +2231,12 @@ class WeChatDB:
                     text = _zstd_decompress(zstd, content)
                     if text:
                         return text
-                # 回退到 blob 提取（无法 zstd 解压时尝试直接剥离容器头）
-                text = _extract_text_from_blob(content)
-                if text:
-                    return text
+            # 回退到 blob 提取（无法 zstd 解压时尝试直接剥离容器头）
+            text = _extract_text_from_blob(content)
+            if text:
+                return text
+            # 两条路都失败：正文将退化为占位符，醒目警告一次（不静默吞掉）
+            _warn_zstd_text_degraded_once(zstd is None)
             if mtype == "图片":
                 md5 = re.search(rb'md5="([0-9a-fA-F]{32})"', content)
                 if md5:

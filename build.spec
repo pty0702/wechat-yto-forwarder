@@ -21,6 +21,9 @@ hidden = [
     "wechatauto.uia_driver", "wechatauto.accessibility",
     # 常见 hook 盲区
     "pyperclip", "websockets",
+    # zstandard：微信 4.x 长文本 zstd 帧解压（vendor 源码随包分发，静态分析
+    # 看不到它的 import；不显式收集则长消息正文退化为「[文本]」占位不被转发）
+    "zstandard",
     # winsdk（WinRT OCR）是命名空间包且只在 guia 函数内 import，
     # 静态收集不稳定曾整包静默丢失（2026-10-26 实测 zip 缩水 11MB）——显式列出
     "winsdk", "winsdk.windows", "winsdk.windows.media.ocr",
