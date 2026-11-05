@@ -348,3 +348,94 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OversizeFilterTests(unittest.TestCase):
+    """超长消息过滤（2026-11-05 用户策略）：多单号/超长正文按忽略处理。"""
+
+    def setUp(self):
+        self.logs = []
+        self.wx = core.MockWxSource()
+        self.kf = core.MockKfSource()
+        self.sent_kf = []
+        self.cfg = core.validate_config({
+            "wx_group": "客户群", "kf_group": "客服群",
+            "service_staff": "客服张", "bot_name": "小圆", "poll_interval": 0.001,
+        })
+        self.forwarder = core.Forwarder(
+            self.cfg, self.wx, core.MockWxSink([]),
+            self.kf, core.MockKfSink(self.sent_kf), self.logs.append,
+        )
+
+    def test_over_50_waybills_ignored(self):
+        text = "\n".join(f"YT0719078{i:05d}" for i in range(51))
+        self.wx.inbox = [core.Message("客户", text)]
+        self.forwarder.poll_wx()
+        self.assertEqual(self.sent_kf, [])
+        self.assertTrue(any("超长消息" in line and "个单号超过上限" in line
+                            for line in self.logs))
+
+    def test_exactly_50_waybills_forwarded(self):
+        text = "\n".join(f"YT0719078{i:05d}" for i in range(50))
+        self.wx.inbox = [core.Message("客户", text)]
+        self.forwarder.poll_wx()
+        self.assertEqual(len(self.sent_kf), 1)
+
+    def test_over_1000_chars_ignored(self):
+        text = f"YT0719078698064改地址 {'江苏省宿迁市沭阳县' * 150}"
+        self.assertGreater(len(text), 1000)
+        self.wx.inbox = [core.Message("客户", text)]
+        self.forwarder.poll_wx()
+        self.assertEqual(self.sent_kf, [])
+        self.assertTrue(any("字" in line and "超过上限" in line for line in self.logs))
+
+    def test_thresholds_configurable(self):
+        cfg = core.validate_config({
+            "wx_group": "客户群", "kf_group": "客服群",
+            "bot_name": "小圆", "poll_interval": 0.001,
+            "max_waybills_per_message": 2, "max_message_chars": 30,
+        })
+        forwarder = core.Forwarder(
+            cfg, self.wx, core.MockWxSink([]),
+            self.kf, core.MockKfSink(self.sent_kf), self.logs.append)
+        self.wx.inbox = [core.Message("客户", "YT0719078698064改地址江苏省宿迁市沭阳县沭城天下23号楼孙小姐15366449580")]
+        forwarder.poll_wx()  # 正文 >50 字 → 忽略
+        self.assertEqual(self.sent_kf, [])
+
+    def test_invalid_threshold_rejected(self):
+        with self.assertRaises(ValueError):
+            core.validate_config({"max_waybills_per_message": 0})
+
+
+class MultiWaybillQueueTests(unittest.TestCase):
+    """多单号消息：全部单号登记待回复队列，小圆逐单回复都能关联搬回。"""
+
+    def setUp(self):
+        self.logs = []
+        self.wx = core.MockWxSource()
+        self.kf = core.MockKfSource()
+        self.sent_wx = []
+        self.sent_kf = []
+        self.cfg = core.validate_config({
+            "wx_group": "客户群", "kf_group": "客服群",
+            "bot_name": "小圆", "poll_interval": 0.001, "reset_seconds": 30,
+        })
+        self.forwarder = core.Forwarder(
+            self.cfg, self.wx, core.MockWxSink(self.sent_wx),
+            self.kf, core.MockKfSink(self.sent_kf), self.logs.append,
+        )
+
+    def test_all_waybills_registered_and_each_reply_routed(self):
+        text = "YT0719078698064改地址甲\nYT0719078611111改地址乙"
+        self.wx.inbox = [core.Message("客户", text)]
+        self.forwarder.poll_wx()
+        self.assertEqual(self.sent_kf, [text])
+        self.assertIn("YT0719078698064", self.forwarder.queue)
+        self.assertIn("YT0719078611111", self.forwarder.queue)
+        # 小圆对两个单号各回一轮，都能搬回原群
+        self.kf.inbox = [
+            core.Message("小圆", "运单号：YT0719078698064，已修改成功"),
+            core.Message("小圆", "运单号：YT0719078611111，已修改成功"),
+        ]
+        self.forwarder.poll_kf()
+        self.assertEqual(len(self.sent_wx), 2)

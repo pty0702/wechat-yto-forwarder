@@ -56,11 +56,11 @@ def read_wechat_self_name() -> str:
 
 def build_profile(wx_self_name: str, kf_self_names: list[str],
                   cdp_url: str = DEFAULT_CDP) -> dict:
-    """最小可用 adapter profile：微信库读 + 客户管家 DOM。"""
+    """最小可用 adapter profile：微信库读 + 客户管家云信发送（DOM 读取）。"""
     return {
         "_说明": "首次运行向导自动生成，可手动补充字段。",
         "wx": {"parser": "wechat_db", "self_names": [wx_self_name]},
-        "kf": {"parser": "yto_dom", "self_names": kf_self_names,
+        "kf": {"parser": "yto_nim", "self_names": kf_self_names,
                "cdp_url": cdp_url},
     }
 

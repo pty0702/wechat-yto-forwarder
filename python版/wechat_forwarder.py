@@ -82,6 +82,8 @@ DEFAULT_CONFIG = {
     "bot_name": "小圆-总公司",  # 必须与机器人显示的完整名称一致
     "poll_interval": 3,    # 轮询间隔（秒）
     "reset_seconds": 30,   # 转发后 30 秒未等到小圆回复 → 重置该条等待
+    "max_waybills_per_message": 50,  # 单条消息单号数上限，超过按忽略处理
+    "max_message_chars": 1000,       # 单条消息正文字数上限，超过按忽略处理
     "mode": "demo",       # 默认演示；真实运行前另行验证窗口配置
     "wechat_accessibility": False,  # 明确启用后，仅对已核对构建临时开启控件
     "wx_profile": {},
@@ -115,6 +117,10 @@ def validate_config(cfg: dict, live: bool = False) -> dict:
         normalized[key] = value.strip()
     if normalized["mode"] not in ("demo", "live"):
         raise ValueError("运行模式只能是 demo 或 live")
+    for key in ("max_waybills_per_message", "max_message_chars"):
+        value = normalized.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"配置项 {key} 必须是正整数")
     if not isinstance(normalized["wechat_accessibility"], bool):
         raise ValueError("微信兼容开关必须是布尔值 true 或 false")
     if not normalized["bot_name"]:
@@ -288,6 +294,16 @@ def classify_with_reason(msg: Message, cfg: dict):
         return Verdict.IGNORE, "图片/语音等媒体占位"
     if not starts_with_waybill(msg.content) and not WAYBILL_RE.search(msg.content):
         return Verdict.IGNORE, "消息中无 YT+单号"
+    # 超长过滤（2026-11-05 用户策略）：批量单号/超长正文不转发——客户管家
+    # 处理不了且发送链路易失败，卡在识别层最干净。阈值可在配置文件调整。
+    max_waybills = cfg.get("max_waybills_per_message", 50)
+    max_chars = cfg.get("max_message_chars", 1000)
+    waybill_count = len(WAYBILL_RE.findall(msg.content))
+    if waybill_count > max_waybills:
+        return Verdict.IGNORE, f"超长消息：{waybill_count} 个单号超过上限 {max_waybills}"
+    if len(msg.content) > max_chars:
+        return Verdict.IGNORE, (f"超长消息：正文 {len(msg.content)} 字"
+                                f"超过上限 {max_chars}")
     # 用户策略（2026-10-27）：YT 开头一律转发，不限制单号个数——多单连发
     # 也要进客服群让小圆逐个处理，不能因多单而丢弃。
     policy = cfg.get("group_policies", {}).get(msg.group) or {}
@@ -506,7 +522,10 @@ class Forwarder:
                               + (f"，跟进：{followup}" if followup else ""))
                 elif verdict is Verdict.FORWARD:
                     self._send(self.kf_snk.send, msg.content)
-                    self.queue.add(extract_waybill(msg.content), target_group)
+                    # 消息里的全部单号都登记等待回复：多单号消息小圆会逐单
+                    # 回复多轮，只登记第一个会导致后续单号的回复无法关联搬回。
+                    for waybill in extract_waybills(msg.content):
+                        self.queue.add(waybill, target_group)
                     notice = (f"[转发] {target_group} → 客户管家 "
                               f"{self.cfg['kf_group']}：{msg.content[:40]}")
                 else:

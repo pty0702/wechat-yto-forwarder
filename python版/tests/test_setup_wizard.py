@@ -18,7 +18,7 @@ class BuildProfileTests(unittest.TestCase):
         profile = setup_wizard.build_profile("微信昵称A", ["小圆"], "http://127.0.0.1:9223")
         self.assertEqual(profile["wx"]["parser"], "wechat_db")
         self.assertEqual(profile["wx"]["self_names"], ["微信昵称A"])
-        self.assertEqual(profile["kf"]["parser"], "yto_dom")
+        self.assertEqual(profile["kf"]["parser"], "yto_nim")
         self.assertEqual(profile["kf"]["self_names"], ["小圆"])
         self.assertEqual(profile["kf"]["cdp_url"], "http://127.0.0.1:9223")
 

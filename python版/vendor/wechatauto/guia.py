@@ -2077,7 +2077,9 @@ class WeChatGUI:
         uia = self._get_uia()
         if uia is not None:
             already = (not who) or uia.current_chat() == who
-            if already or uia.open_chat(who):
+            # 本项目修改：open_chat 点击失败会误报成功（消息进当前停留的群），
+            # 打开后必须读会话名核对，对齐下方坐标路径的 _chat_is_open 核对。
+            if already or (uia.open_chat(who) and uia.current_chat() == who):
                 sent = uia.send_text(text)
                 if not sent and already:
                     # current_chat 读的是常驻控件：主窗切到朋友圈页以后，它照样
