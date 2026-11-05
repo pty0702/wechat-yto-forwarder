@@ -13,6 +13,7 @@ vendor = pydir / "vendor"
 hidden = [
     # 项目模块：多数经函数内延迟 import，静态分析可能漏掉
     "runtime", "windows_adapter", "wechat_db_adapter", "kf_dom_adapter",
+    "kf_nim_adapter",
     "wechat4_adapter", "wechat_accessibility", "wechat_multiselect",
     "message_snapshot", "accessibility_gate", "live_checks",
     "license_client", "setup_wizard",

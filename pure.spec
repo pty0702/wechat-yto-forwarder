@@ -8,6 +8,7 @@ vendor = pydir / "vendor"
 
 hidden = [
     "runtime", "windows_adapter", "wechat_db_adapter", "kf_dom_adapter",
+    "kf_nim_adapter",
     "wechat4_adapter", "wechat_accessibility", "wechat_multiselect",
     "message_snapshot", "accessibility_gate", "live_checks", "setup_wizard",
     "wechatauto", "wechatauto.db", "wechatauto.guia",
