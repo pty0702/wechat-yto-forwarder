@@ -2064,9 +2064,14 @@ class WeChatGUI:
         失败时重试；已发送但 DB 未落库时轮询等待确认，不重复发送。
         """
         # 快速路径：连续发送同一会话（如分段回复）时，复用已探测的输入框，
-        # 跳过 ensure_visible / 会话重检 / 重复探测与截图确认，失败自动回退完整流程。
+        # 跳过 ensure_visible / 重复探测与截图确认，失败自动回退完整流程。
+        # 本项目修改（2026-11-09）：凭 _current_chat 缓存直发在界面被切走
+        # （人工操作/其他流程切会话）时会把消息发进当前停留的错群——客户
+        # 诊断包实测两次错群均出自此路径。补一次 _chat_is_open 真读界面核对，
+        # 与 UIA/坐标两条路径对齐；核对失败自动落回完整流程。
         if (not verify and who
                 and who == getattr(self, '_current_chat', None)
+                and self._chat_is_open(who)
                 and getattr(self, '_last_input_box', None) is not None
                 and self.input_text(text, box=self._last_input_box, fast=True)
                 and self.click_send(fast=True)):

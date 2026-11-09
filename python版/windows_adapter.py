@@ -586,12 +586,26 @@ def create_live_adapters(cfg, log=print, need=None):
                 # 云信 SDK 直连通道：回执明确、无 DOM 模拟，替代 yto_dom。
                 from kf_nim_adapter import KfNimAdapter
                 kf = KfNimAdapter(profile["kf"], cfg["kf_group"], log)
+                kf.prepare()
             elif profile["kf"].get("parser") == "yto_dom":
+                # 老配置自动升级（2026-11-09）：DOM 发送存在连发丢消息/假阳性
+                # 上屏，云信通道带回执。升级说明没人手动改 profile（诊断包实测
+                # v2.6 装机后 parser 仍是 yto_dom），改为自动启用、失败回退。
                 from kf_dom_adapter import KfDomAdapter
-                kf = KfDomAdapter(profile["kf"], cfg["kf_group"], log)
+                try:
+                    from kf_nim_adapter import KfNimAdapter
+                    kf = KfNimAdapter(profile["kf"], cfg["kf_group"], log)
+                    kf.prepare()
+                    log("[适配] 检测到旧 DOM 配置，已自动启用云信发送通道（服务器回执确认）")
+                except Exception as exc:
+                    kf = KfDomAdapter(profile["kf"], cfg["kf_group"], log)
+                    kf.prepare()
+                    log(f"[适配] 云信发送通道启用失败，回退 DOM 通道：{exc}")
+                    log("[适配] DOM 通道连发可能丢消息，请检查客户管家客户端"
+                        "是否已登录并停留在目标群后重启本程序")
             else:
                 kf = WindowsChatAdapter(auto, profile["kf"], cfg["kf_group"], "客户管家", log)
-            kf.prepare()
+                kf.prepare()
         yield wx, wx, kf, kf
 
 
